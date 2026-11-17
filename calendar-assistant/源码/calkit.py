@@ -18,10 +18,24 @@ from EventKit import (
     EKAlarm,
     EKEvent,
     EKEventStore,
+    EKRecurrenceRule,
+    EKRecurrenceFrequencyDaily,
+    EKRecurrenceFrequencyWeekly,
+    EKRecurrenceFrequencyMonthly,
+    EKRecurrenceFrequencyYearly,
     EKEntityTypeEvent,  # noqa: F401  (常量=0，EventKit 模块提供)
 )
 
 EntityTypeEvent = 0
+
+# 重复规则：界面下拉值 → EventKit 频率常量；读回时反向映射成中文
+_RECUR_FREQ = {
+    "daily": EKRecurrenceFrequencyDaily,
+    "weekly": EKRecurrenceFrequencyWeekly,
+    "monthly": EKRecurrenceFrequencyMonthly,
+    "yearly": EKRecurrenceFrequencyYearly,
+}
+_FREQ_LABEL = {"daily": "每天", "weekly": "每周", "monthly": "每月", "yearly": "每年"}
 
 _AUTH_NAME = {0: "未决定", 1: "受限", 2: "拒绝", 3: "已授权(完整)", 4: "已授权(仅写入)"}
 
@@ -115,8 +129,12 @@ class CalendarKit:
         location: str = "",
         notes: str = "",
         alarm_at: _dt.datetime | None = None,
+        recur: str | None = None,
     ) -> str:
-        """写入事件。日期用 NSDate 直接构造，不经字符串拼接。返回事件标识。"""
+        """写入事件。日期用 NSDate 直接构造，不经字符串拼接。返回事件标识。
+
+        recur：重复规则（daily/weekly/monthly/yearly，None=不重复）。
+        """
         if end <= start:
             raise CalendarError("结束时间必须晚于开始时间。")
         self.request_access()
@@ -131,6 +149,11 @@ class CalendarKit:
             ev.setNotes_(notes)
         if alarm_at is not None:
             ev.addAlarm_(EKAlarm.alarmWithAbsoluteDate_(_nsdate(alarm_at)))
+        if recur in _RECUR_FREQ:
+            rule = EKRecurrenceRule.alloc().initWithRecurrenceWithFrequency_interval_end_(
+                _RECUR_FREQ[recur], 1, None
+            )
+            ev.addRecurrenceRule_(rule)
         ok, error = self.store.saveEvent_span_error_(ev, 0, None)
         if not ok:
             raise CalendarError(f"写入日历失败：{error}")
@@ -170,6 +193,10 @@ class CalendarKit:
                             _from_nsdate(ev.alarms()[0].absoluteDate())
                             if ev.alarms() and ev.alarms()[0].absoluteDate()
                             else None
+                        ),
+                        "recur": next(
+                            (_FREQ_LABEL[int(r.frequency())] for r in (ev.recurrenceRules() or [])),
+                            "",
                         ),
                     }
                 )

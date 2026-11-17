@@ -25,6 +25,7 @@ class Parsed:
     calendar_hint: str | None = None
     calendar_score: int = 0
     has_date: bool = False   # 输入里是否显式含日期（多事件时第二条继承日期用）
+    recur: str = ""          # 重复提示：daily/weekly/monthly/yearly（空=不重复），供界面预选
     warnings: list[str] = field(default_factory=list)
 
     @property
@@ -296,6 +297,31 @@ def parse(text: str, now: dt.datetime | None = None) -> Parsed:
     # 仅当后面紧跟「月…日」完整日期时才替换，避免「明年3月的计划」被改成「2027年3月的计划」
     s = re.sub(r"明年\s*(?=\d{1,2}\s*月\s*\d{1,2}\s*[日号])", f"{base.year + 1}年", s)
     s = re.sub(r"今年\s*(?=\d{1,2}\s*月\s*\d{1,2}\s*[日号])", f"{base.year}年", s)
+    # 重复提示（循环表述）：「每周三例会」「每天晨会」——开始时间取首个出现日，
+    # 是否真按重复写入由用户在「重复」下拉里确认，解析只做预选不做决断。
+    # 「每周三」由日期片段整体消费；这里只消费不带动日期的「每天/每月/每年/每周」，
+    # 防止它们漏进标题（「每天站会」→「站会」）
+    if re.search(r"每[天日]", s):
+        p.recur = "daily"
+    elif re.search(r"每[周星期礼拜]", s):
+        p.recur = "weekly"
+    elif re.search(r"每月", s):
+        p.recur = "monthly"
+    elif re.search(r"每年", s):
+        p.recur = "yearly"
+    # 「每月10号」：裸日无月份上下文，落成「最近的下一个10号」的绝对日期
+    def _monthly_day(m: re.Match) -> str:
+        d = int(m.group(1))
+        try:
+            cand = base.replace(day=d)
+            if cand < base:
+                y, mo = (base.year + 1, 1) if base.month == 12 else (base.year, base.month + 1)
+                cand = dt.date(y, mo, d)
+            return cand.strftime("%Y年%m月%d日")
+        except ValueError:
+            return m.group(0)
+    s = re.sub(r"每月\s*(\d{1,2})\s*[日号]", _monthly_day, s)
+    s = re.sub(r"每(?:[天日]|月|年|[周星期礼拜](?![一二三四五六日天]))", "", s)
 
     # 1) 地点
     m = _RE_LOC_LABEL.search(s)
@@ -498,6 +524,9 @@ def format_parsed(p: Parsed) -> str:
         lines.append(f"地点：{p.location}")
     if p.notes:
         lines.append(f"备注：{p.notes}")
+    if p.recur:
+        label = {"daily": "每天", "weekly": "每周", "monthly": "每月", "yearly": "每年"}.get(p.recur, p.recur)
+        lines.append(f"重复：{label}（解析提示，可在表单改）")
     if p.calendar_hint:
         lines.append(f"建议分类：{p.calendar_hint}（得分 {p.calendar_score}，可改）")
     for w in p.warnings:

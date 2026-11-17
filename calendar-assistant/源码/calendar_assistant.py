@@ -349,14 +349,22 @@ def run_gui():
     ent_notes = ttk.Entry(grid, width=50, font=FONT)
     ent_notes.grid(row=5, column=1, sticky="w", pady=5, columnspan=2)
 
+    lbl(6, "重复：")
+    cmb_recur = ttk.Combobox(grid, state="readonly", width=10, font=FONT,
+                             values=("不重复", "每天", "每周", "每月", "每年"))
+    cmb_recur.set("不重复")
+    cmb_recur.grid(row=6, column=1, sticky="w", pady=5)
+    tk.Label(grid, text="「每周三例会」这类表述会自动预选", font=FONT_SM, bg=CARD, fg=MUTED).grid(
+        row=6, column=2, sticky="w", padx=(10, 0))
+
     var_alarm = tk.BooleanVar(value=False)
     chk_alarm = ttk.Checkbutton(grid, text="按出发时间设提醒（完全地址＋可定位时自动计算）",
                                 variable=var_alarm)
-    chk_alarm.grid(row=6, column=1, sticky="w", pady=(6, 2), columnspan=2)
-    lbl(7, "提前缓冲(分钟)：")
+    chk_alarm.grid(row=7, column=1, sticky="w", pady=(6, 2), columnspan=2)
+    lbl(8, "提前缓冲(分钟)：")
     ent_buffer = ttk.Entry(grid, width=8, font=FONT)
     ent_buffer.insert(0, "10")
-    ent_buffer.grid(row=7, column=1, sticky="w", pady=(2, 0))
+    ent_buffer.grid(row=8, column=1, sticky="w", pady=(2, 0))
     for _w in (cmb_cal, ent_title, ent_start, ent_end, ent_loc, ent_notes, ent_buffer):
         bind_context_menu(_w)
 
@@ -396,6 +404,8 @@ def run_gui():
             set_status("日历授权未完成，分类未能读取；已可手填，请到 系统设置→隐私→日历 允许后点「刷新日历分类」。", err=True)
 
     # ---------- 解析 ----------
+    _RECUR_LABEL = {"daily": "每天", "weekly": "每周", "monthly": "每月", "yearly": "每年"}
+
     def apply_parsed_to_form(p):
         if p.title:
             ent_title.delete(0, "end")
@@ -412,6 +422,7 @@ def run_gui():
         if p.notes:
             ent_notes.delete(0, "end")
             ent_notes.insert(0, p.notes)
+        cmb_recur.set(_RECUR_LABEL.get(p.recur, "不重复"))
         if p.calendar_hint:
             for name in state["calendars"]:
                 if p.calendar_hint in name or name in p.calendar_hint:
@@ -504,10 +515,14 @@ def run_gui():
         elif var_alarm.get() and not loc:
             plan_lines = ["⚠ 勾选了出发提醒但未填地点，未设提醒"]
 
+        recur_label = cmb_recur.get() if cmb_recur.get() != "不重复" else ""
+        recur = {"每天": "daily", "每周": "weekly", "每月": "monthly", "每年": "yearly"}.get(recur_label)
+
         msg = (
             f"日历：{cal}\n标题：{title}\n开始：{_fmt_dt(start)}\n结束：{_fmt_dt(end)}"
             + (f"\n地点：{loc}" if loc else "")
             + (f"\n提醒：{_fmt_dt(alarm_at)}" if alarm_at else (f"\n提醒：无" if not var_alarm.get() else "\n提醒：未能自动计算"))
+            + (f"\n重复：{recur_label}" if recur_label else "")
             + (f"\n备注：{notes}" if notes else "")
         )
         if plan_lines:
@@ -516,7 +531,7 @@ def run_gui():
         if not messagebox.askyesno("确认添加", msg):
             return
         try:
-            ident = kit.add_event(cal, title, start, end, loc, notes, alarm_at)
+            ident = kit.add_event(cal, title, start, end, loc, notes, alarm_at, recur)
         except CalendarError as e:
             messagebox.showerror("写入失败", str(e))
             set_status(str(e), err=True)
@@ -529,6 +544,7 @@ def run_gui():
                 line += (
                     f"\n读回核对：开始 {_fmt_dt(ev['start'])}，结束 {_fmt_dt(ev['end'])}"
                     + (f"，提醒 {_fmt_dt(ev['alarm_time'])}" if ev.get("alarm_time") else "")
+                    + (f"，重复 {ev['recur']}" if ev.get("recur") else "")
                 )
         set_status(line)
         # 多条时自动跳到下一条待核对
@@ -549,6 +565,7 @@ def run_gui():
         txt_preview.delete("1.0", "end")
         for w in (ent_title, ent_start, ent_end, ent_loc, ent_notes):
             w.delete(0, "end")
+        cmb_recur.set("不重复")
         state["events"] = []
         state["eidx"] = 0
         update_multi_nav()
@@ -577,7 +594,8 @@ def run_gui():
             nonlocal found
             found = kit.find_events_by_title(q) if q else []
             for i, ev in enumerate(found):
-                lst.insert("end", f"{_fmt_dt(ev['start'])} ~ {_fmt_dt(ev['end'])}  [{ev['calendar']}]  {ev['title']}")
+                lst.insert("end", f"{_fmt_dt(ev['start'])} ~ {_fmt_dt(ev['end'])}  [{ev['calendar']}]  {ev['title']}"
+                           + (f"（{ev['recur']}）" if ev.get("recur") else ""))
 
         def do_find():
             try:
@@ -701,7 +719,7 @@ def run_cli(args) -> int:
                 notes = args.notes or p.notes or ""
                 ident = kit.add_event(
                     args.calendar, title, p.start, p.end or p.start + dt.timedelta(hours=1),
-                    p.location, notes, alarm_at,
+                    p.location, notes, alarm_at, args.recur or None,
                 )
                 say(f"[{i}/{n}] ADDED", ident, "«" + title + "»",
                     f"{_fmt_dt(p.start)}~{_fmt_dt(p.end or p.start + dt.timedelta(hours=1))}")
@@ -753,6 +771,7 @@ def main():
     p_add.add_argument("--notes")
     p_add.add_argument("--alarm", action="store_true")
     p_add.add_argument("--buffer", type=int, default=10)
+    p_add.add_argument("--recur", choices=("daily", "weekly", "monthly", "yearly"), default=None)
     p_rb = _sub("readback")
     p_rb.add_argument("--title", required=True)
     p_rb.add_argument("--days-back", type=int, default=30)
