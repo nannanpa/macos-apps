@@ -142,7 +142,7 @@ def run_gui():
     def make_card(parent, title, subtitle=""):
         outer = tk.Frame(parent, bg=CARD, highlightbackground=LINE, highlightthickness=1, bd=0)
         head = tk.Frame(outer, bg=CARD)
-        head.pack(fill="x", padx=16, pady=(11, 6))
+        head.pack(fill="x", padx=16, pady=(8, 4))
         tk.Label(head, text=title, font=("PingFang SC", 14, "bold"), bg=CARD, fg=INK).pack(side="left")
         if subtitle:
             tk.Label(head, text=subtitle, font=FONT_SM, bg=CARD, fg=MUTED).pack(side="left", padx=(10, 0))
@@ -281,6 +281,13 @@ def run_gui():
         if cw > 1:
             canvas.itemconfig(body_win, width=max(1, cw - 32))
         canvas.configure(scrollregion=canvas.bbox("all"))
+        # 滚动条按需显示：内容不超过窗口高度时不出现，避免「一打开就有滚动条」的观感
+        region = canvas.bbox("all")
+        if region and canvas.winfo_ismapped():
+            if region[3] - region[1] <= canvas.winfo_height():
+                view_sb.pack_forget()
+            elif not view_sb.winfo_ismapped():
+                view_sb.pack(side="right", fill="y")
 
     canvas.bind("<Configure>", _fit_canvas)
     body.bind("<Configure>", _fit_canvas)
@@ -292,19 +299,19 @@ def run_gui():
 
     # ---------- 顶部：模糊输入 ----------
     frm_top = make_card(body, "① 输入", "粘贴或输入一句话通知")
-    frm_top.pack(fill="x", pady=(0, 12))
+    frm_top.pack(fill="x", pady=(0, 10))
     input_row = tk.Frame(frm_top, bg=CARD)
-    input_row.pack(fill="x", padx=16, pady=(0, 14))
+    input_row.pack(fill="x", padx=16, pady=(0, 10))
     input_row.columnconfigure(0, weight=1)  # 输入框吃掉剩余宽度，右侧只留「解析」按钮
     ent_raw = ttk.Entry(input_row, font=FONT)
     ent_raw.grid(row=0, column=0, sticky="ew")
 
     frm_preview = make_card(body, "② 解析结果", "逐项核对，下方表单可直接修改")
-    frm_preview.pack(fill="x", pady=(0, 12))
+    frm_preview.pack(fill="x", pady=(0, 10))
     # 解析框固定行数＋滚动条：内容多时框内滚动，不再弹性撑高把「行程信息」挤出窗口
     prev_wrap = tk.Frame(frm_preview, bg=CARD)
-    prev_wrap.pack(fill="x", padx=16, pady=(0, 14))
-    txt_preview = tk.Text(prev_wrap, height=6, wrap="word", font=("PingFang SC", 12),
+    prev_wrap.pack(fill="x", padx=16, pady=(0, 10))
+    txt_preview = tk.Text(prev_wrap, height=4, wrap="word", font=("PingFang SC", 12),
                           bg="#ffffff", fg=INK, relief="flat", highlightbackground=LINE,
                           highlightthickness=1, padx=10, pady=8)
     txt_preview.pack(side="left", fill="both", expand=True)
@@ -318,54 +325,80 @@ def run_gui():
     frm_form = make_card(body, "③ 行程信息", "已按解析结果预填")
     frm_form.pack(fill="x", pady=(0, 10))
     grid = tk.Frame(frm_form, bg=CARD)
-    grid.pack(fill="x", padx=16, pady=(0, 14))
+    grid.pack(fill="x", padx=16, pady=(0, 10))
 
     lbl = lambda r, t: tk.Label(grid, text=t, font=FONT_SM, bg=CARD, fg=MUTED).grid(
-        row=r, column=0, sticky="e", padx=(8, 6), pady=5)
+        row=r, column=0, sticky="e", padx=(8, 6), pady=2)
 
     lbl(0, "日历分类：")
     cmb_cal = ttk.Combobox(grid, state="readonly", width=30, font=FONT)
-    cmb_cal.grid(row=0, column=1, sticky="w", pady=5)
+    cmb_cal.grid(row=0, column=1, sticky="w", pady=2)
 
     lbl(1, "标题：")
     ent_title = ttk.Entry(grid, width=50, font=FONT)
-    ent_title.grid(row=1, column=1, sticky="w", pady=5, columnspan=2)
+    ent_title.grid(row=1, column=1, sticky="w", pady=3, columnspan=2)
 
     lbl(2, "开始时间：")
     ent_start = ttk.Entry(grid, width=22, font=FONT)
-    ent_start.grid(row=2, column=1, sticky="w", pady=5)
+    ent_start.grid(row=2, column=1, sticky="w", pady=2)
     tk.Label(grid, text="格式 YYYY-MM-DD HH:MM", font=FONT_SM, bg=CARD, fg=MUTED).grid(
         row=2, column=2, sticky="w", padx=(10, 0))
 
     lbl(3, "结束时间：")
     ent_end = ttk.Entry(grid, width=22, font=FONT)
-    ent_end.grid(row=3, column=1, sticky="w", pady=5)
+    ent_end.grid(row=3, column=1, sticky="w", pady=2)
 
     lbl(4, "地点：")
     ent_loc = ttk.Entry(grid, width=50, font=FONT)
-    ent_loc.grid(row=4, column=1, sticky="w", pady=5, columnspan=2)
+    ent_loc.grid(row=4, column=1, sticky="w", pady=3, columnspan=2)
 
     lbl(5, "备注：")
     ent_notes = ttk.Entry(grid, width=50, font=FONT)
-    ent_notes.grid(row=5, column=1, sticky="w", pady=5, columnspan=2)
+    ent_notes.grid(row=5, column=1, sticky="w", pady=3, columnspan=2)
 
     lbl(6, "重复：")
     cmb_recur = ttk.Combobox(grid, state="readonly", width=14, font=FONT,
                              values=("不重复", "每天", "每周", "每月", "每年", "自定义…"))
     cmb_recur.set("不重复")
-    cmb_recur.grid(row=6, column=1, sticky="w", pady=5)
+    cmb_recur.grid(row=6, column=1, sticky="w", pady=2)
     tk.Label(grid, text="循环表述自动预选；自定义可设隔N周/星期几/次数/截止",
              font=FONT_SM, bg=CARD, fg=MUTED).grid(row=6, column=2, sticky="w", padx=(10, 0))
 
+    # 提醒1（出发提醒）＋提前缓冲合并一行；提醒2 为第二道提醒（同 EventKit 的「另一次提醒」）
     var_alarm = tk.BooleanVar(value=False)
-    chk_alarm = ttk.Checkbutton(grid, text="按出发时间设提醒（完全地址＋可定位时自动计算）",
-                                variable=var_alarm)
-    chk_alarm.grid(row=7, column=1, sticky="w", pady=(6, 2), columnspan=2)
-    lbl(8, "提前缓冲(分钟)：")
-    ent_buffer = ttk.Entry(grid, width=8, font=FONT)
+    lbl(7, "提醒1：")
+    row7 = tk.Frame(grid, bg=CARD)
+    row7.grid(row=7, column=1, sticky="w", columnspan=2)
+    ttk.Checkbutton(row7, text="按出发时间设提醒（完全地址＋可定位时自动计算）",
+                    variable=var_alarm).pack(side="left")
+    tk.Label(row7, text="提前", font=FONT_SM, bg=CARD, fg=MUTED).pack(side="left", padx=(12, 3))
+    ent_buffer = ttk.Entry(row7, width=4, font=FONT, justify="center")
     ent_buffer.insert(0, "10")
-    ent_buffer.grid(row=8, column=1, sticky="w", pady=(2, 0))
-    for _w in (cmb_cal, ent_title, ent_start, ent_end, ent_loc, ent_notes, ent_buffer):
+    ent_buffer.pack(side="left")
+    tk.Label(row7, text="分钟", font=FONT_SM, bg=CARD, fg=MUTED).pack(side="left", padx=(3, 0))
+
+    lbl(8, "提醒2：")
+    row8 = tk.Frame(grid, bg=CARD)
+    row8.grid(row=8, column=1, sticky="w", columnspan=2)
+    tk.Label(row8, text="提前", font=FONT_SM, bg=CARD, fg=MUTED).pack(side="left")
+    ent_alarm2 = ttk.Entry(row8, width=4, font=FONT, justify="center")
+    ent_alarm2.pack(side="left", padx=3)
+    tk.Label(row8, text="分钟（留空不设）", font=FONT_SM, bg=CARD, fg=MUTED).pack(side="left")
+
+    lbl(9, "受邀人：")
+    ent_att = ttk.Entry(grid, width=50, font=FONT)
+    ent_att.grid(row=9, column=1, sticky="w", pady=2)
+    tk.Label(grid, text="逗号分隔，写入备注", font=FONT_SM, bg=CARD, fg=MUTED).grid(
+        row=9, column=2, sticky="w", padx=(10, 0))
+
+    lbl(10, "URL：")
+    ent_url = ttk.Entry(grid, width=50, font=FONT)
+    ent_url.grid(row=10, column=1, sticky="w", pady=2)
+    tk.Label(grid, text="会议链接/资料地址", font=FONT_SM, bg=CARD, fg=MUTED).grid(
+        row=10, column=2, sticky="w", padx=(10, 0))
+
+    for _w in (cmb_cal, ent_title, ent_start, ent_end, ent_loc, ent_notes,
+               ent_buffer, ent_alarm2, ent_att, ent_url):
         bind_context_menu(_w)
 
     frm_btn = tk.Frame(body, bg=BG)
@@ -557,10 +590,8 @@ def run_gui():
 
         rowbtn = tk.Frame(frm, bg=CARD)
         rowbtn.pack(anchor="e", pady=(4, 0))
-        tk.Button(rowbtn, text="取消", font=FONT, bg=CARD, fg=INK, relief="solid",
-                  bd=1, command=on_cancel).pack(side="left", padx=6)
-        tk.Button(rowbtn, text="确定", font=FONT, bg=BLUE, fg="#ffffff",
-                  relief="flat", command=on_ok).pack(side="left")
+        FlatButton(rowbtn, "取消", on_cancel, kind="ghost").pack(side="left", padx=6)
+        FlatButton(rowbtn, "确定", on_ok, kind="primary").pack(side="left")
         dlg.grab_set()
 
     cmb_recur.bind("<<ComboboxSelected>>", on_recur_selected)
@@ -634,6 +665,11 @@ def run_gui():
             return
         loc = ent_loc.get().strip()
         notes = ent_notes.get().strip()
+        att = ent_att.get().strip()
+        if att:
+            # EventKit 无公开 API 写受邀人（只能读），受邀人记入备注随事件保存
+            notes = (notes + "\n" if notes else "") + "受邀人：" + att
+        url = ent_url.get().strip()
         buffer_min = 10
         try:
             buffer_min = int(ent_buffer.get().strip() or "10")
@@ -650,6 +686,14 @@ def run_gui():
                 alarm_at = plan["alarm"]
         elif var_alarm.get() and not loc:
             plan_lines = ["⚠ 勾选了出发提醒但未填地点，未设提醒"]
+        # 提醒2：事件开始前 N 分钟，绝对时间
+        alarm2_at = None
+        try:
+            a2 = int(ent_alarm2.get().strip())
+            if a2 > 0:
+                alarm2_at = start - dt.timedelta(minutes=a2)
+        except ValueError:
+            pass
 
         sel = cmb_recur.get()
         cust = state.get("recur_custom") or {}
@@ -666,8 +710,11 @@ def run_gui():
             f"日历：{cal}\n标题：{title}\n开始：{_fmt_dt(start)}\n结束：{_fmt_dt(end)}"
             + (f"\n地点：{loc}" if loc else "")
             + (f"\n提醒：{_fmt_dt(alarm_at)}" if alarm_at else (f"\n提醒：无" if not var_alarm.get() else "\n提醒：未能自动计算"))
+            + (f"\n提醒2：开始前{int(ent_alarm2.get().strip())}分钟（{_fmt_dt(alarm2_at)}）" if alarm2_at else "")
             + (f"\n重复：{recur_label}" if recur_label else "")
-            + (f"\n备注：{notes}" if notes else "")
+            + (f"\n受邀人：{att}" if att else "")
+            + (f"\nURL：{url}" if url else "")
+            + (f"\n备注：{notes.splitlines()[0] if notes.splitlines() else ''}" if notes else "")
         )
         if plan_lines:
             msg += "\n\n" + "\n".join(plan_lines)
@@ -675,7 +722,8 @@ def run_gui():
         if not messagebox.askyesno("确认添加", msg):
             return
         try:
-            ident = kit.add_event(cal, title, start, end, loc, notes, alarm_at, recur)
+            ident = kit.add_event(cal, title, start, end, loc, notes,
+                                  alarm_at, alarm2_at, url, recur)
         except CalendarError as e:
             messagebox.showerror("写入失败", str(e))
             set_status(str(e), err=True)
@@ -687,7 +735,8 @@ def run_gui():
             if ev["identifier"] == ident:
                 line += (
                     f"\n读回核对：开始 {_fmt_dt(ev['start'])}，结束 {_fmt_dt(ev['end'])}"
-                    + (f"，提醒 {_fmt_dt(ev['alarm_time'])}" if ev.get("alarm_time") else "")
+                    + (f"，提醒×{ev['n_alarms']}" if ev.get("n_alarms") else "")
+                    + (f"，URL {ev['url']}" if ev.get("url") else "")
                     + (f"，重复 {ev['recur']}" if ev.get("recur") else "")
                 )
         set_status(line)
@@ -707,7 +756,7 @@ def run_gui():
     def clear_input_area():
         ent_raw.delete(0, "end")
         txt_preview.delete("1.0", "end")
-        for w in (ent_title, ent_start, ent_end, ent_loc, ent_notes):
+        for w in (ent_title, ent_start, ent_end, ent_loc, ent_notes, ent_alarm2, ent_att, ent_url):
             w.delete(0, "end")
         cmb_recur.set("不重复")
         state["recur_custom"] = None
@@ -795,11 +844,14 @@ def run_gui():
     # 窗口封顶到 screen_h-30 避开菜单栏，剩余放不下的部分由 canvas 滚动兜底，绝不裁控件。
     root.update_idletasks()
     _fit_canvas()
-    content_h = body.winfo_reqheight() + 32  # 左右/上下边距
-    want_h = header.winfo_reqheight() + content_h + 16
+    root.geometry(f"900x{max(620, header.winfo_reqheight() + body.winfo_reqheight() + 60)}")
+    root.update_idletasks()
+    _fit_canvas()
+    # 二次校正：定宽布局后 body 实际高度与 reqheight 有偏差（实测 ~60px），
+    # 按实际高度重设，保证内容恰好放得下、滚动条只在真超高时出现
+    body_real = body.winfo_height()
     screen_h = root.winfo_screenheight()
-    want_h = min(want_h, screen_h - 30)
-    want_h = max(want_h, 620)
+    want_h = min(max(620, header.winfo_reqheight() + body_real + 27), screen_h - 30)
     root.geometry(f"900x{want_h}")
     root.update_idletasks()
     _fit_canvas()
@@ -864,7 +916,9 @@ def run_cli(args) -> int:
                 notes = args.notes or p.notes or ""
                 ident = kit.add_event(
                     args.calendar, title, p.start, p.end or p.start + dt.timedelta(hours=1),
-                    p.location, notes, alarm_at, args.recur or None,
+                    p.location, notes, alarm_at,
+                    (p.start - dt.timedelta(minutes=args.alarm2)) if args.alarm2 else None,
+                    args.url or "", args.recur or None,
                 )
                 say(f"[{i}/{n}] ADDED", ident, "«" + title + "»",
                     f"{_fmt_dt(p.start)}~{_fmt_dt(p.end or p.start + dt.timedelta(hours=1))}")
@@ -917,6 +971,8 @@ def main():
     p_add.add_argument("--alarm", action="store_true")
     p_add.add_argument("--buffer", type=int, default=10)
     p_add.add_argument("--recur", choices=("daily", "weekly", "monthly", "yearly"), default=None)
+    p_add.add_argument("--url", default="")
+    p_add.add_argument("--alarm2", type=int, default=None, help="第二次提醒：事件开始前分钟数")
     p_rb = _sub("readback")
     p_rb.add_argument("--title", required=True)
     p_rb.add_argument("--days-back", type=int, default=30)

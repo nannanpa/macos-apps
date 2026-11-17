@@ -196,11 +196,14 @@ class CalendarKit:
         location: str = "",
         notes: str = "",
         alarm_at: _dt.datetime | None = None,
+        alarm2_at: _dt.datetime | None = None,
+        url: str = "",
         recur: str | dict | None = None,
     ) -> str:
         """写入事件。日期用 NSDate 直接构造，不经字符串拼接。返回事件标识。
 
-        recur：重复规则（见 _build_recurrence_rule 三种形态，None=不重复）。
+        alarm_at/alarm2_at：两个提醒的绝对时间（EventKit 支持一事件多提醒）；
+        url：事件链接（event.URL 属性可写）；recur：重复规则（见 _build_recurrence_rule）。
         """
         if end <= start:
             raise CalendarError("结束时间必须晚于开始时间。")
@@ -216,6 +219,13 @@ class CalendarKit:
             ev.setNotes_(notes)
         if alarm_at is not None:
             ev.addAlarm_(EKAlarm.alarmWithAbsoluteDate_(_nsdate(alarm_at)))
+        if alarm2_at is not None:
+            ev.addAlarm_(EKAlarm.alarmWithAbsoluteDate_(_nsdate(alarm2_at)))
+        if url:
+            ns = Foundation.NSURL.URLWithString_(url if "://" in url else "https://" + url)
+            if ns is None:
+                raise CalendarError(f"链接无效，请检查 URL 格式：{url}")
+            ev.setURL_(ns)
         rule = _build_recurrence_rule(recur)
         if rule is not None:
             ev.addRecurrenceRule_(rule)
@@ -259,6 +269,8 @@ class CalendarKit:
                             if ev.alarms() and ev.alarms()[0].absoluteDate()
                             else None
                         ),
+                        "n_alarms": len(ev.alarms() or []),
+                        "url": str(ev.URL()) if ev.URL() else "",
                         "recur": next(
                             (_rule_label(r) for r in (ev.recurrenceRules() or [])),
                             "",
