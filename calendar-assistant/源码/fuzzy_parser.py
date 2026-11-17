@@ -43,7 +43,7 @@ _PERIOD_ALSO = {"今晚": 19, "明晚": 19, "昨夜": 20}
 # 日期表达式（先后顺序即优先级）
 _RE_ABS_DATE = re.compile(r"(?:(\d{4})\s*年)?(\d{1,2})\s*月\s*(\d{1,2})\s*[日号]")
 _RE_REL_DATE = re.compile(r"(大后天|后天|明天|今天|今晚|明晚|今天晚上)")
-_RE_WEEK_DATE = re.compile(r"(下下?|这)?(?:周|礼拜|星期)([一二三四五六日天])")
+_RE_WEEK_DATE = re.compile(r"(?:每)?(上|下下?|这)?(?:周|礼拜|星期)([一二三四五六日天])")
 _RE_SLASH_DATE = re.compile(r"(?<![:\d])(\d{1,2})[/](\d{1,2})(?![\d分秒])")
 _RE_DASH_DATE = re.compile(r"(?<![:\d])(\d{1,2})[-](\d{1,2})(?![\d])")
 _RE_BARE_DAY = re.compile(r"(\d{1,2})\s*[日号]")
@@ -55,7 +55,7 @@ _RE_PERIOD = re.compile(r"(凌晨|清晨|早上|早晨|上午|中午|午后|下�
 _DATE_ALT = (
     r"(?:(?:\d{4})\s*年)?(?:\d{1,2})\s*月\s*(?:\d{1,2})\s*[日号]"
     r"|大后天|后天|明天|今天"
-    r"|(?:下下?|这)?(?:周|礼拜|星期)(?:[一二三四五六日天])"
+    r"|(?:每)?(?:上|下下?|这)?(?:周|礼拜|星期)(?:[一二三四五六日天])"
     r"|(?:\d{1,2})[/](?:\d{1,2})"
     r"|(?:\d{1,2})[-](?:\d{1,2})"
     r"|(?:\d{1,2})\s*[日号]"
@@ -63,18 +63,50 @@ _DATE_ALT = (
 _PERIOD_ALT = "凌晨|清晨|早上|早晨|上午|中午|午后|下午|傍晚|晚上|夜里|今晚|明晚"
 _TIME_ALT = r"(?:\d{1,2}\s*[:：]\s*\d{1,2})|(?:\d{1,2}\s*点(?:\s*半|\s*\d{1,2}\s*分?)?)|(?:\d{1,2}\s*点半)"
 
-# 完整表达式：日期? 时段? 时刻?（覆盖「明天下午3点」「4月7日18:30」「晚上7点」「8日18:30」）
+# 完整表达式：日期? 时段? 时刻?（约数「左右/前后」随时刻一并消费，避免漏进标题）
 _RE_DATETIME = re.compile(
-    rf"(?P<date>\s*(?:{_DATE_ALT}))?\s*(?P<period>(?:{_PERIOD_ALT}))?\s*(?P<time>(?:{_TIME_ALT}))?"
+    rf"(?P<date>\s*(?:{_DATE_ALT}))?\s*(?P<period>(?:{_PERIOD_ALT}))?\s*(?P<time>(?:{_TIME_ALT}))?(?:\s*(?:左右|前后))?"
 )
 
-_RE_RANGE_SEP = re.compile(r"\s*(?:到|至|~|～|—|–|--|-)\s*")
+_RE_RANGE_SEP = re.compile(r"\s*(?:到|至|~|～|—|–|--|-|－)\s*")
 _RE_DURATION = re.compile(r"(\d{1,3})\s*(?:个)?\s*(?:小时|钟头|h|H)")
 _RE_ALLDAY = re.compile(r"全天|一整天|整天")
 
+# 中文数字时刻归一：「下午二点半」→「下午2点半」。只对「X点(半|X分|X)」结构生效，
+# 不碰「五中全会」「三楼会议室」这类不含「点」的数字词。
+_CN_NUM = {"零": 0, "一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5,
+           "六": 6, "七": 7, "八": 8, "九": 9, "十": 10}
+
+def _cn_num_to_int(s: str) -> int | None:
+    if s == "十":
+        return 10
+    if len(s) == 2 and s[0] == "十":
+        return 10 + _CN_NUM.get(s[1], 0) if s[1] in _CN_NUM else None
+    if len(s) == 2 and s[1] == "十":
+        return _CN_NUM.get(s[0], 0) * 10 if s[0] in _CN_NUM else None
+    return _CN_NUM.get(s)
+
+_RE_CN_TIME = re.compile(r"([零一二两三四五六七八九十]{1,2})\s*点(?:\s*(半|[零一二两三四五六七八九十]{1,3})\s*分?)?")
+
+def _norm_cn_time(s: str) -> str:
+    def rep(m: re.Match) -> str:
+        h = _cn_num_to_int(m.group(1))
+        if h is None or not 0 <= h <= 23:
+            return m.group(0)
+        rest = (m.group(2) or "").strip()
+        if not rest:
+            return f"{h}点"
+        if rest == "半":
+            return f"{h}点半"
+        mi = _cn_num_to_int(rest)
+        if mi is None or not 0 <= mi <= 59:
+            return m.group(0)
+        return f"{h}点{mi}分"
+    return _RE_CN_TIME.sub(rep, s)
+
 # 地点：标签式 与 「在 + 地点名」
 _RE_LOC_LABEL = re.compile(r"(?:地点|地址|位置|@\s*)[:：]?\s*([^\s，。；;、]{2,40})")
-_RE_LOC_ZAI = re.compile(r"在([^\s，。；;、到至~—-]{2,40}?)(?=$|[\s，。；;、]|从|，)")
+_RE_LOC_ZAI = re.compile(r"在([^\s，。；;、到至~—-]{2,40}?)(?=$|[\s，。；;、]|从|，|召开|举行|举办|进行|开)")
 
 # ---------------- 分类初判 ----------------
 
@@ -177,11 +209,14 @@ def _resolve_date(expr: str, base: dt.date, prev: dt.date | None) -> dt.date | N
     if m:
         prefix, wd = m.group(1) or "", _WEEKDAY[m.group(2)]
         delta = (wd - base.weekday()) % 7
+        if prefix == "上":
+            # 「上周五」：过去引用。仅作日期上下文（纯日期片段不占起止槽），不造未来行程
+            return base - dt.timedelta(days=delta if delta else 7)
         if prefix == "下下":
             return base + dt.timedelta(days=delta + 14)
         if prefix == "下":
             return base + dt.timedelta(days=delta + 7)
-        # 这 / 无前缀：本周的该天（含今天本身）
+        # 这 / 每 / 无前缀：本周的该天（含今天本身）
         return base + dt.timedelta(days=delta)
     m = _RE_SLASH_DATE.fullmatch(expr)
     if m:
@@ -255,6 +290,12 @@ def parse(text: str, now: dt.datetime | None = None) -> Parsed:
         r"[（(]\s*((?:\d{4}\s*年)?\s*\d{1,2}\s*月\s*\d{1,2}\s*[日号])\s*[）)]",
         r"\1", s,
     )
+    # 中文数字时刻归一（「二点半」→「2点半」）
+    s = _norm_cn_time(s)
+    # 「明年/今年X月X日」：把相对年份落成4位年，防「明年1月1日」落到今年的过去日期。
+    # 仅当后面紧跟「月…日」完整日期时才替换，避免「明年3月的计划」被改成「2027年3月的计划」
+    s = re.sub(r"明年\s*(?=\d{1,2}\s*月\s*\d{1,2}\s*[日号])", f"{base.year + 1}年", s)
+    s = re.sub(r"今年\s*(?=\d{1,2}\s*月\s*\d{1,2}\s*[日号])", f"{base.year}年", s)
 
     # 1) 地点
     m = _RE_LOC_LABEL.search(s)
@@ -271,13 +312,16 @@ def parse(text: str, now: dt.datetime | None = None) -> Parsed:
     frags = _find_datetimes(s)
     consumed: list[tuple[int, int]] = []
 
-    def ineligible(span: tuple[int, int]) -> bool:
+    def ineligible(span: tuple[int, int], date_e: str | None = None, warn: bool = True) -> bool:
         """判别「不该占起止槽」的干扰时间片段。
 
         - 截止提醒：「…10:00前提交」——「前」紧跟时间，是截止而非开始；
           「请提前10分钟」的「前」不在片段末尾，不受影响。
         - 被修正的旧时间：「原定X，现推迟到Y」——X 已被 Y 取代，取 Y。
         - 被否定的时间：「明天不是后天」——「不是」后的片段无效。
+        - 过去年份引用：「去年12月20日的会」——指过去，不应造出行程。
+        - 节日/泛指日期（仅当片段本身无日期时）：「端午节上午9点」落不到具体日子，
+          宁可不起时间也不猜一个；「国庆节10月1日」带具体日期则不受此限。
         """
         a, b = span
         after = s[b:].lstrip()
@@ -287,6 +331,15 @@ def parse(text: str, now: dt.datetime | None = None) -> Parsed:
         if re.search(r"(?:原定|原计划|原本|原先)\s*$", head) and re.search(r"(?:推迟|改|调整|变更)到", s[b:]):
             return True
         if re.search(r"(?:不是|并非)\s*$", head):
+            return True
+        if re.search(r"(?:去年|前年)\s*$", head):
+            return True
+        if date_e is None and re.search(
+            r"(?:端午|中秋|春节|国庆|元旦|清明|元宵|重阳|七夕|除夕|腊八|周末|双休日?|节假日|改天|改日|择日)"
+            r"[^\s，。]{0,2}$", head,
+        ):
+            if warn:
+                p.warnings.append("日期是节日/泛指（无法落到具体日子），本次未设定时间，请手动补充")
             return True
         return False
 
@@ -306,7 +359,7 @@ def parse(text: str, now: dt.datetime | None = None) -> Parsed:
         if overlap(*span):
             i += 1
             continue
-        if ineligible(span):
+        if ineligible(span, date_e):
             take(*span)  # 干扰时间也从标题里移除，不留残片
             i += 1
             continue
@@ -316,7 +369,7 @@ def parse(text: str, now: dt.datetime | None = None) -> Parsed:
             span2, period2, date_e2, time_e2 = frags[i + 1]
             between = s[span[1]: span2[0]]
             msep = _RE_RANGE_SEP.fullmatch(between.strip()) if between.strip() else None
-            if msep and not overlap(*span2) and not ineligible(span2):
+            if msep and not overlap(*span2) and not ineligible(span2, date_e2, warn=False):
                 # 解析左
                 d1 = _resolve_date(date_e, base, None) if date_e else (prev_date or base)
                 if date_e:
@@ -414,6 +467,8 @@ def parse(text: str, now: dt.datetime | None = None) -> Parsed:
     remain = re.sub(r"\s{2,}", " ", remain)
     remain = re.sub(r"[\s，。；;、到至~\-—–]*$", "", remain)
     remain = re.sub(r"^[\s，。；;、~\-—–]+", "", remain)
+    # 日期片段整体消费后残留的领属助词（「上周五的专题会」→「的专题会」）
+    remain = re.sub(r"^[的了]+", "", remain)
     remain = remain.strip()
     # 会议通知类长文本：提炼会议名作标题，议题/主持等进备注
     title, extra_notes = refine_title(remain)
@@ -427,6 +482,8 @@ def parse(text: str, now: dt.datetime | None = None) -> Parsed:
         p.warnings.append("未解析到结束时间，默认开始后1小时，请确认")
     if p.end is not None and p.end <= p.start:
         p.warnings.append("结束时间早于开始时间，请检查")
+    if p.start is not None and p.start < now:
+        p.warnings.append("行程时间在过去，请确认")
     return p
 
 
@@ -460,12 +517,12 @@ _RE_THX = re.compile(r"[，,]?\s*(?:谢谢|特此通知|特此公告)[。！!]?\
 # 带动词的会议名（「召开XX会」结构明确，名称可含「会」）
 _RE_MEET = re.compile(
     r"(?:召开|举行|举办|开展)\s*([\u4e00-\u9fa5A-Za-z0-9]{2,60}?"
-    r"(?:领导小组会|工作会议|工作会|全体会议|专题会议|会议|大会|例会|座谈会|讨论会|研讨会|培训会|发布会|办公会|协调会|会))"
+    r"(?:领导小组会|工作会议|工作会|全体会议|专题会议|会议|大会|例会|座谈会|讨论会|研讨会|培训会|发布会|办公会|协调会|年会|会))"
 )
 # 裸会议名（整句匹配；不用单字「会」收尾，防「五中全会精神方案」被误截）
 _RE_MEET_BARE = re.compile(
-    r"^([\u4e00-\u9fa5A-Za-z0-9「」]{2,60}?"
-    r"(?:领导小组会|工作会议|工作会|全体会议|专题会议|会议|大会|例会|座谈会|讨论会|研讨会|培训会|发布会|办公会|协调会|晨会|周会))$"
+    r"^([\u4e00-\u9fa5A-Za-z0-9「」]{1,60}?"
+    r"(?:领导小组会|工作会议|工作会|全体会议|专题会议|会议|大会|例会|座谈会|讨论会|研讨会|培训会|发布会|办公会|协调会|晨会|周会|年会))$"
 )
 _RE_TITLE_SEG = re.compile(r"[，,；;。！!]+")
 # 背景套话分句：以「根据/按照/依据…安排/要求/部署/精神」起头的状语——只交代来由、不承载行程内容
