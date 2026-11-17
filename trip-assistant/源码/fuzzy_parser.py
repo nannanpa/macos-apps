@@ -1,0 +1,578 @@
+# -*- coding: utf-8 -*-
+"""
+fuzzy_parser.py — 中文模糊行程输入解析 + 日历分类初判
+原则：
+- 只做规则级解析，所有解析结果必须显式回显给用户确认，解析不确定的字段留空回退手动输入，绝不静默猜。
+- 日期解析全部基于 datetime 计算，支持：X月X日、X日（继承前文月年）、相对日（今天/明天/后天/周X/下周X）、
+  时刻（HH:MM、X点半、X点X分、上午/下午/晚上等时段词）、跨天区间（X到Y、X-Y、X~Y、X至Y）、时长（N小时）。
+"""
+from __future__ import annotations
+
+import datetime as dt
+import re
+from dataclasses import dataclass, field
+
+# ---------------- 数据结构 ----------------
+
+@dataclass
+class Parsed:
+    raw: str = ""
+    title: str = ""
+    start: dt.datetime | None = None
+    end: dt.datetime | None = None
+    location: str = ""
+    notes: str = ""                 # 从长通知里剥离的议题/主持等非标题信息
+    calendar_hint: str | None = None
+    calendar_score: int = 0
+    has_date: bool = False   # 输入里是否显式含日期（多事件时第二条继承日期用）
+    warnings: list[str] = field(default_factory=list)
+
+    @property
+    def ok(self) -> bool:
+        return self.start is not None and bool(self.title)
+
+# ---------------- 基础词法 ----------------
+
+_WEEKDAY = {"一": 0, "二": 1, "三": 2, "四": 3, "五": 4, "六": 5, "日": 6, "天": 6}
+_PERIOD = {
+    "凌晨": 4, "清晨": 6, "早上": 9, "早晨": 9, "上午": 9,
+    "中午": 12, "午后": 13, "下午": 14, "傍晚": 18, "晚上": 19, "夜里": 20,
+}
+_PERIOD_ALSO = {"今晚": 19, "明晚": 19, "昨夜": 20}
+
+# 日期表达式（先后顺序即优先级）
+_RE_ABS_DATE = re.compile(r"(?:(\d{4})\s*年)?(\d{1,2})\s*月\s*(\d{1,2})\s*[日号]")
+_RE_REL_DATE = re.compile(r"(大后天|后天|明天|今天|今晚|明晚|今天晚上)")
+_RE_WEEK_DATE = re.compile(r"(下下?|这)?(?:周|礼拜|星期)([一二三四五六日天])")
+_RE_SLASH_DATE = re.compile(r"(?<![:\d])(\d{1,2})[/](\d{1,2})(?![\d分秒])")
+_RE_DASH_DATE = re.compile(r"(?<![:\d])(\d{1,2})[-](\d{1,2})(?![\d])")
+_RE_BARE_DAY = re.compile(r"(\d{1,2})\s*[日号]")
+_RE_TIME = re.compile(
+    r"(?:(\d{1,2})\s*[:：]\s*(\d{1,2})|(\d{1,2})\s*点\s*(?:半|(\d{1,2})\s*分?)?|(\d{1,2})\s*点半)"
+)
+_RE_PERIOD = re.compile(r"(凌晨|清晨|早上|早晨|上午|中午|午后|下午|傍晚|晚上|夜里)")
+
+_DATE_ALT = (
+    r"(?:(?:\d{4})\s*年)?(?:\d{1,2})\s*月\s*(?:\d{1,2})\s*[日号]"
+    r"|大后天|后天|明天|今天"
+    r"|(?:下下?|这)?(?:周|礼拜|星期)(?:[一二三四五六日天])"
+    r"|(?:\d{1,2})[/](?:\d{1,2})"
+    r"|(?:\d{1,2})[-](?:\d{1,2})"
+    r"|(?:\d{1,2})\s*[日号]"
+)
+_PERIOD_ALT = "凌晨|清晨|早上|早晨|上午|中午|午后|下午|傍晚|晚上|夜里|今晚|明晚"
+_TIME_ALT = r"(?:\d{1,2}\s*[:：]\s*\d{1,2})|(?:\d{1,2}\s*点(?:\s*半|\s*\d{1,2}\s*分?)?)|(?:\d{1,2}\s*点半)"
+
+# 完整表达式：日期? 时段? 时刻?（覆盖「明天下午3点」「4月7日18:30」「晚上7点」「8日18:30」）
+_RE_DATETIME = re.compile(
+    rf"(?P<date>\s*(?:{_DATE_ALT}))?\s*(?P<period>(?:{_PERIOD_ALT}))?\s*(?P<time>(?:{_TIME_ALT}))?"
+)
+
+_RE_RANGE_SEP = re.compile(r"\s*(?:到|至|~|～|—|–|--|-)\s*")
+_RE_DURATION = re.compile(r"(\d{1,3})\s*(?:个)?\s*(?:小时|钟头|h|H)")
+_RE_ALLDAY = re.compile(r"全天|一整天|整天")
+
+# 地点：标签式 与 「在 + 地点名」
+_RE_LOC_LABEL = re.compile(r"(?:地点|地址|位置|@\s*)[:：]?\s*([^\s，。；;、]{2,40})")
+_RE_LOC_ZAI = re.compile(r"在([^\s，。；;、到至~—-]{2,40}?)(?=$|[\s，。；;、]|从|，)")
+
+# ---------------- 分类初判 ----------------
+
+_KEYWORDS: dict[str, list[str]] = {
+    "工作": [
+        "值班", "开会", "会议", "例会", "周会", "月会", "晨会", "面试", "汇报", "述职",
+        "评审", "培训", "加班", "项目", "讲座", "答辩", "办公", "出差", "调研", "接待",
+        "检查", "考核", "监考", "教研", "备课", "上课", "监考",
+    ],
+    "家庭": [
+        "生日", "家宴", "爸妈", "爸爸", "妈妈", "父母", "老婆", "老公", "孩子", "儿子",
+        "女儿", "家长", "接送", "看病", "陪", "家庭", "全家", "祭", "扫墓", "探亲", "亲戚",
+    ],
+    "私人": ["健身", "跑步", "理发", "体检", "看牙", "打球", "游泳", "看电影", "旅行"],
+    "学习": ["读书", "自习", "网课", "考试", "刷题", "课程", "学"],
+}
+
+
+def guess_calendar(title: str, location: str, calendar_names: list[str]) -> tuple[str | None, int]:
+    """关键词打分初判分类。返回 (建议分类名或None, 得分)。得分低则不猜。"""
+    text = f"{title} {location}"
+    scores: dict[str, int] = {}
+    for cat, words in _KEYWORDS.items():
+        s = sum(2 for w in words if w in text)
+        if s:
+            scores[cat] = scores.get(cat, 0) + s
+    if not scores:
+        return None, 0
+    best_cat, best_score = max(scores.items(), key=lambda kv: kv[1])
+    # 与现有日历名匹配：分类词命中真实日历名 → 强信号
+    for name in calendar_names:
+        if best_cat in name or name in best_cat:
+            return name, best_score + 8
+    # 关键词与某个日历名字面重合（如日历名里含「值班」）
+    for name in calendar_names:
+        if any(w and w in name for w in _KEYWORDS.get(best_cat, [])):
+            return name, best_score + 5
+    # 命中默认三分类之一且得分够高 → 用分类名本身（用户可改）
+    if best_score >= 2:
+        return best_cat, best_score
+    return None, best_score
+
+
+# ---------------- 日期时间解析 ----------------
+
+def _apply_period(h: int, period: str | None) -> tuple[int, str | None]:
+    """按时段词校准小时，返回 (小时, 警告或None)。"""
+    if not period:
+        return h, None
+    if period in ("凌晨",):
+        return (h if h <= 6 else 12 - h if 12 <= h <= 18 else h), None
+    if period in ("早上", "早晨", "清晨", "上午"):
+        return (h if h < 12 else h - 12 if 12 <= h <= 23 else h), None
+    if period in ("中午",):
+        if h < 10 or h > 14:
+            return 12, f"时段「中午」与{h}点不一致，已按12点处理，请确认"
+        return h, None
+    if period in ("午后", "下午", "傍晚", "晚上", "夜里", "今晚", "明晚"):
+        if h < 12:
+            # 「晚上7点」= 19:00，属常规读法，不告警
+            return h + 12, None
+        return h, None
+    return h, None
+
+
+def _parse_time_to_hm(t: str) -> tuple[int, int] | None:
+    t = t.strip()
+    m = re.fullmatch(r"(\d{1,2})\s*[:：]\s*(\d{1,2})", t)
+    if m:
+        return int(m.group(1)), int(m.group(2))
+    m = re.fullmatch(r"(\d{1,2})\s*点\s*(?:半|(\d{1,2})\s*分?)?", t)
+    if m:
+        h = int(m.group(1))
+        mi = 30 if (m.group(2) is None and "半" in t) else int(m.group(2) or 0)
+        return h, mi
+    m = re.fullmatch(r"(\d{1,2})\s*点半", t)
+    if m:
+        return int(m.group(1)), 30
+    return None
+
+
+def _resolve_date(expr: str, base: dt.date, prev: dt.date | None) -> dt.date | None:
+    """把日期表达式落到具体日期。prev=区间左侧日期，用于继承「8日」这类残缺表达。"""
+    expr = expr.strip()
+    m = _RE_ABS_DATE.fullmatch(expr)
+    if m:
+        y = int(m.group(1)) if m.group(1) else (prev.year if prev else base.year)
+        return dt.date(y, int(m.group(2)), int(m.group(3)))
+    if expr in ("今天",):
+        return base
+    if expr in ("今晚",):
+        return base
+    if expr in ("明天",):
+        return base + dt.timedelta(days=1)
+    if expr in ("后天",):
+        return base + dt.timedelta(days=2)
+    if expr in ("大后天",):
+        return base + dt.timedelta(days=3)
+    m = _RE_WEEK_DATE.fullmatch(expr)
+    if m:
+        prefix, wd = m.group(1) or "", _WEEKDAY[m.group(2)]
+        delta = (wd - base.weekday()) % 7
+        if prefix == "下下":
+            return base + dt.timedelta(days=delta + 14)
+        if prefix == "下":
+            return base + dt.timedelta(days=delta + 7)
+        # 这 / 无前缀：本周的该天（含今天本身）
+        return base + dt.timedelta(days=delta)
+    m = _RE_SLASH_DATE.fullmatch(expr)
+    if m:
+        mo, d = int(m.group(1)), int(m.group(2))
+        y = prev.year if (prev and mo < prev.month) else base.year
+        return dt.date(y, mo, d)
+    m = _RE_DASH_DATE.fullmatch(expr)
+    if m:
+        mo, d = int(m.group(1)), int(m.group(2))
+        y = prev.year if (prev and mo < prev.month) else base.year
+        return dt.date(y, mo, d)
+    # 裸日表达（如「8日」）：继承前文月年（B6 场景关键路径）
+    m = _RE_BARE_DAY.fullmatch(expr)
+    if m:
+        if prev is None:
+            return None
+        try:
+            return dt.date(prev.year, prev.month, int(m.group(1)))
+        except ValueError:
+            return None
+    return None
+
+
+def _find_datetimes(text: str):
+    """扫出全部日期时间表达式片段。返回 [(span, period, date_expr, time_str)]"""
+    out = []
+    for m in _RE_DATETIME.finditer(text):
+        period = m.group("period")
+        date_e = m.group("date")
+        time_e = m.group("time")
+        if not date_e and not time_e:
+            continue
+        if not date_e and time_e and not period:
+            # 纯时刻（如「18:30」），要求前面无日期——照收
+            pass
+        out.append((m.span(), period, date_e, time_e))
+    return out
+
+
+def parse(text: str, now: dt.datetime | None = None) -> Parsed:
+    p = Parsed(raw=text)
+    now = now or dt.datetime.now()
+    base = now.date()
+    s = text.strip()
+    # 先剥离星期/相对日括注（如「（周五，明天）」），防止括注内词被误当天时间片段
+    s = re.sub(r"[（(][^（）()]*(?:周[一二三四五六日天]|星期|礼拜|今天|明天|后天)[^（）()]*[）)]", "", s)
+    # 相对日后的绝对日括注（如「明天（11月17日）」）：以括号里的绝对日期为准，
+    # 去掉相对日。通知里特意括注具体日期，就是为了消除「明天」随阅读日漂移的歧义
+    # （例：11/17 收到「明天（11月17日）」，意图是 11/17，不是按相对词算出的 11/18）。
+    # 归一成绝对日后，紧邻的「上午10:00」仍会与之合成同一时间片段，不会被拆成
+    # 独立日期片段去抢占结束槽——原实现保留相对日、丢弃绝对日期，方向反了。
+    # 若括注日期非法（如「2月30日」），回退保留相对日，避免抛异常或丢掉日期。
+    def _use_abs_date(m: re.Match) -> str:
+        rel, abs_e = m.group(1), m.group(2).strip()
+        am = _RE_ABS_DATE.fullmatch(abs_e)
+        if am:
+            try:
+                y = int(am.group(1)) if am.group(1) else base.year
+                dt.date(y, int(am.group(2)), int(am.group(3)))
+                return abs_e  # 合法：以括号里的绝对日期为准
+            except ValueError:
+                pass
+        return rel  # 非法：回退相对日
+    s = re.sub(
+        r"(今天|明天|后天|大后天|今晚|明晚)\s*[（(]\s*"
+        r"((?:\d{4}\s*年)?\s*\d{1,2}\s*月\s*\d{1,2}\s*[日号])\s*[）)]",
+        _use_abs_date, s,
+    )
+    # 独立绝对日括注（无相对日在前）：只去括号符号，保留日期文本
+    s = re.sub(
+        r"[（(]\s*((?:\d{4}\s*年)?\s*\d{1,2}\s*月\s*\d{1,2}\s*[日号])\s*[）)]",
+        r"\1", s,
+    )
+
+    # 1) 地点
+    m = _RE_LOC_LABEL.search(s)
+    if m:
+        p.location = m.group(1).strip()
+        s = s[: m.start()] + s[m.end():]
+    else:
+        m = _RE_LOC_ZAI.search(s)
+        if m:
+            p.location = m.group(1).strip()
+            s = s[: m.start()] + s[m.end():]
+
+    # 2) 日期时间片段
+    frags = _find_datetimes(s)
+    consumed: list[tuple[int, int]] = []
+
+    def ineligible(span: tuple[int, int]) -> bool:
+        """判别「不该占起止槽」的干扰时间片段。
+
+        - 截止提醒：「…10:00前提交」——「前」紧跟时间，是截止而非开始；
+          「请提前10分钟」的「前」不在片段末尾，不受影响。
+        - 被修正的旧时间：「原定X，现推迟到Y」——X 已被 Y 取代，取 Y。
+        - 被否定的时间：「明天不是后天」——「不是」后的片段无效。
+        """
+        a, b = span
+        after = s[b:].lstrip()
+        head = s[:a].rstrip()
+        if re.match(r"^(?:之?前|以前)", after) and not after.startswith("提前"):
+            return True
+        if re.search(r"(?:原定|原计划|原本|原先)\s*$", head) and re.search(r"(?:推迟|改|调整|变更)到", s[b:]):
+            return True
+        if re.search(r"(?:不是|并非)\s*$", head):
+            return True
+        return False
+
+    def take(a: int, b: int):
+        consumed.append((a, b))
+
+    def overlap(a: int, b: int) -> bool:
+        return any(not (b <= x or a >= y) for x, y in consumed)
+
+    start_dt = end_dt = None
+    prev_date: dt.date | None = None
+    found_date = False
+
+    i = 0
+    while i < len(frags):
+        span, period, date_e, time_e = frags[i]
+        if overlap(*span):
+            i += 1
+            continue
+        if ineligible(span):
+            take(*span)  # 干扰时间也从标题里移除，不留残片
+            i += 1
+            continue
+        # 尝试「左侧 + 分隔符 + 右侧」区间
+        matched_range = False
+        if i + 1 < len(frags):
+            span2, period2, date_e2, time_e2 = frags[i + 1]
+            between = s[span[1]: span2[0]]
+            msep = _RE_RANGE_SEP.fullmatch(between.strip()) if between.strip() else None
+            if msep and not overlap(*span2) and not ineligible(span2):
+                # 解析左
+                d1 = _resolve_date(date_e, base, None) if date_e else (prev_date or base)
+                if date_e:
+                    prev_date = d1
+                    found_date = True
+                hm1 = _parse_time_to_hm(time_e) if time_e else None
+                h1, mi1 = hm1 if hm1 else (_PERIOD.get(period or "", 9), 0)
+                raw_h1 = h1  # 校准前的小时，供右侧继承时段时判断「同日递增」
+                h1, warn = _apply_period(h1, period)
+                if warn:
+                    p.warnings.append(warn)
+                sd = dt.datetime.combine(d1, dt.time(h1, mi1))
+                # 解析右
+                d2 = _resolve_date(date_e2, base, d1) if date_e2 else d1
+                hm2 = _parse_time_to_hm(time_e2) if time_e2 else None
+                if hm2:
+                    h2, mi2 = hm2
+                else:
+                    h2, mi2 = _PERIOD.get(period2 or "", 18), 0
+                # 右侧未写时段词、「小时数变大」（如「下午2点到3点」）时继承左侧时段，
+                # 否则 3点 会被当成凌晨 03:00。小时变小（「晚上11点到1点」）仍按跨天处理。
+                eff_period2 = period2
+                if period2 is None and hm2 and raw_h1 < 12 and h2 > raw_h1:
+                    eff_period2 = period
+                h2, warn2 = _apply_period(h2, eff_period2)
+                if warn2:
+                    p.warnings.append(warn2)
+                ed = dt.datetime.combine(d2, dt.time(h2, mi2))
+                if not date_e2 and not time_e2:
+                    ed = sd + dt.timedelta(hours=1)
+                if ed <= sd and d2 == d1 and not date_e2:
+                    ed = ed + dt.timedelta(days=1)
+                start_dt, end_dt = sd, ed
+                take(*span)
+                take(*span2)
+                take(span[0], span2[1])
+                matched_range = True
+                i += 2
+                continue
+        if not matched_range:
+            d1 = _resolve_date(date_e, base, prev_date) if date_e else (prev_date or base)
+            if date_e:
+                prev_date = d1
+                found_date = True
+            # 纯日期片段（无时刻、无时段词）：只作日期上下文，不占开始/结束槽。
+            # 否则「材料明天现场发放」里的「明天」会被当成 09:00 结束时间，
+            # 制造「结束早于开始」的假警报，并覆盖真实时刻。
+            if date_e and not time_e and not period:
+                take(*span)
+                i += 1
+                continue
+            hm1 = _parse_time_to_hm(time_e) if time_e else None
+            h1, mi1 = hm1 if hm1 else (_PERIOD.get(period or "", 9), 0)
+            h1, warn = _apply_period(h1, period)
+            if warn:
+                p.warnings.append(warn)
+            sd = dt.datetime.combine(d1, dt.time(h1, mi1))
+            if start_dt is None:
+                start_dt = sd
+            elif end_dt is None:
+                end_dt = sd
+            take(*span)
+        i += 1
+
+    # 3) 时长（如「24小时值班」）
+    mdur = _RE_DURATION.search(s)
+    if mdur:
+        hours = int(mdur.group(1))
+        if start_dt is not None and end_dt is None:
+            end_dt = start_dt + dt.timedelta(hours=hours)
+        take(mdur.span()[0], mdur.span()[1])
+
+    # 4) 全天
+    mall = _RE_ALLDAY.search(s)
+    if mall:
+        if start_dt is not None:
+            end_dt = dt.datetime.combine(start_dt.date() + dt.timedelta(days=1), dt.time(0, 0))
+        take(mall.span()[0], mall.span()[1])
+
+    # 5) 标题 = 去掉已消费片段后的剩余
+    remain = ""
+    last = 0
+    for a, b in sorted(consumed):
+        remain += s[last:a]
+        last = max(last, b)
+    remain += s[last:]
+    # 去掉残余的星期/相对日括注，如「（周五，明天）」
+    remain = re.sub(r"[（(][^）)]*(?:周[一二三四五六日天]|星期|礼拜|今天|明天|后天|上午|下午|农历)[^）)]*[）)]", "", remain)
+    # 不在开头剥离「召开/举行/举办/开展」：refine_title 靠它们做会议名锚点，
+    # 且它识别后本就会去掉动词；这里提前剥掉会让带后续分句的长标题降级为整段原样。
+    remain = re.sub(r"^\s*(?:从|于|定在|定个|添加|安排|记一?条|记个|进行|参加)\s*", "", remain)
+    # 清掉剥离括注后残留的空括号、重复标点（如「工作安排，，召开」）
+    remain = re.sub(r"[（(]\s*[）)]", "", remain)
+    remain = re.sub(r"([，,、;；])\s*\1+", r"\1", remain)
+    remain = re.sub(r"\s{2,}", " ", remain)
+    remain = re.sub(r"[\s，。；;、到至~\-—–]*$", "", remain)
+    remain = re.sub(r"^[\s，。；;、~\-—–]+", "", remain)
+    remain = remain.strip()
+    # 会议通知类长文本：提炼会议名作标题，议题/主持等进备注
+    title, extra_notes = refine_title(remain)
+    p.title = title
+    p.notes = extra_notes
+    p.start = start_dt
+    p.end = end_dt
+    p.has_date = found_date
+    if start_dt is not None and end_dt is None:
+        p.end = start_dt + dt.timedelta(hours=1)
+        p.warnings.append("未解析到结束时间，默认开始后1小时，请确认")
+    if p.end is not None and p.end <= p.start:
+        p.warnings.append("结束时间早于开始时间，请检查")
+    return p
+
+
+def format_parsed(p: Parsed) -> str:
+    lines = [f"输入：{p.raw}"]
+    lines.append(f"标题：{p.title or '（未解析到，请手动填写）'}")
+    if p.start:
+        lines.append(f"开始：{p.start:%Y-%m-%d %H:%M}")
+    if p.end:
+        lines.append(f"结束：{p.end:%Y-%m-%d %H:%M}")
+    if p.location:
+        lines.append(f"地点：{p.location}")
+    if p.notes:
+        lines.append(f"备注：{p.notes}")
+    if p.calendar_hint:
+        lines.append(f"建议分类：{p.calendar_hint}（得分 {p.calendar_score}，可改）")
+    for w in p.warnings:
+        lines.append(f"⚠ {w}")
+    return "\n".join(lines)
+
+
+# ---------------- 多事件解析 ----------------
+
+_SENT_SPLIT = re.compile(r"[。；;\n\r]+")
+
+# ---------------- 标题提炼（会议通知类长文本） ----------------
+# 寒暄套话：开头「处长您好！」、结尾「请您按时参会，谢谢」
+_RE_HI = re.compile(r"^\s*[\u4e00-\u9fa5]{1,8}(?:您好|你好|好)\s*[！!。，,]\s*")
+_RE_BYE = re.compile(r"[，,]?\s*(?:请您|请各位|请大家|请)[^。！!]{0,40}?(?:参会|参加|出席|知悉|谢谢)[^。！!]*[。！!]?\s*$")
+_RE_THX = re.compile(r"[，,]?\s*(?:谢谢|特此通知|特此公告)[。！!]?\s*$")
+# 带动词的会议名（「召开XX会」结构明确，名称可含「会」）
+_RE_MEET = re.compile(
+    r"(?:召开|举行|举办|开展)\s*([\u4e00-\u9fa5A-Za-z0-9]{2,60}?"
+    r"(?:领导小组会|工作会议|工作会|全体会议|专题会议|会议|大会|例会|座谈会|讨论会|研讨会|培训会|发布会|办公会|协调会|会))"
+)
+# 裸会议名（整句匹配；不用单字「会」收尾，防「五中全会精神方案」被误截）
+_RE_MEET_BARE = re.compile(
+    r"^([\u4e00-\u9fa5A-Za-z0-9「」]{2,60}?"
+    r"(?:领导小组会|工作会议|工作会|全体会议|专题会议|会议|大会|例会|座谈会|讨论会|研讨会|培训会|发布会|办公会|协调会|晨会|周会))$"
+)
+_RE_TITLE_SEG = re.compile(r"[，,；;。！!]+")
+# 背景套话分句：以「根据/按照/依据…安排/要求/部署/精神」起头的状语——只交代来由、不承载行程内容
+_RE_BG_CLAUSE = re.compile(r"^(?:根据|按照|依据|遵照)[^，,]{0,20}?(?:安排|要求|部署|精神|通知|要求)$")
+# 后勤事务分句：材料/文件的发放、领取、准备——执行细节，不属于会议本身
+_RE_LOGISTICS = re.compile(
+    r"(?:材料|文件|纸质版|纸质材料)[^，,]{0,16}?(?:发放|分发|领取|准备)"
+    r"|(?:发放|分发|领取)[^，,]{0,16}?(?:材料|文件|纸质版)"
+    r"|现场发放|会后[^，,]{0,6}发放"
+)
+# 主持句尾部「会议」与标题重复（标题已是会议名），收成「主持」
+_RE_HOST_TAIL = re.compile(r"(主持)会议$")
+
+
+def refine_title(title: str) -> tuple[str, str]:
+    """从长通知文本里提炼会议名作标题，其余（议题/主持等实质信息）作备注。
+
+    背景套话（根据…安排）与后勤说明（材料发放）不进备注：它们不承载行程内容。
+    「主持会议」收成「主持」：标题已是会议名，尾部「会议」重复。
+    只在能明确识别会议名时才替换，否则标题原样返回、备注为空——遵守「不静默猜」。
+    返回 (标题, 备注)。
+    """
+    s = title.strip()
+    s = _RE_HI.sub("", s)
+    s = _RE_BYE.sub("", s)
+    s = _RE_THX.sub("", s)
+    segs = [x.strip() for x in _RE_TITLE_SEG.split(s) if x.strip()]
+    if not segs:
+        return title.strip(), ""
+    meet = None
+    for seg in segs:
+        m = _RE_MEET.search(seg)
+        if m:
+            meet = m.group(1).strip()
+            break
+    if meet is None:
+        for seg in segs:
+            m = _RE_MEET_BARE.fullmatch(seg)
+            if m:
+                meet = m.group(1).strip()
+                break
+    if not meet:
+        return title.strip(), ""
+    notes = []
+    for seg in segs:
+        if seg == meet or meet in seg:
+            continue
+        if _RE_BG_CLAUSE.match(seg) or _RE_LOGISTICS.search(seg):
+            continue  # 背景套话与后勤说明不进备注：不承载议题/主持信息
+        n = _RE_MEET.sub("", seg).strip(" ，,")
+        n = _RE_HOST_TAIL.sub(r"\1", n)  # 「哈校长主持会议」→「哈校长主持」
+        if n:
+            notes.append(n)
+    return meet, "，".join(notes)
+
+
+def parse_multi(text: str, now: dt.datetime | None = None) -> list[Parsed]:
+    """一条输入解析出多条行程。
+
+    规则：
+    - 按 。；;换行 分句，每句独立解析；
+    - 后续句无显式日期但有时刻时，继承前一句的日期（「9:10-9:50进行……」）；
+    - 全局「地点：X」标签作用于全部事件；各句内「在X」地点仍按句生效；
+    - 无日期时间的残句并入上一条的标题，避免丢信息。
+    """
+    now = now or dt.datetime.now()
+    s = text.strip()
+    if not s:
+        return []
+
+    # 全局地点标签（地点：X / 地址：X）取第一处，作用于全部
+    shared_loc = ""
+    m = _RE_LOC_LABEL.search(s)
+    if m:
+        shared_loc = m.group(1).strip()
+        s = s[: m.start()] + s[m.end():]
+
+    events: list[Parsed] = []
+    prev_date: dt.date | None = None
+
+    for seg in [t.strip() for t in _SENT_SPLIT.split(s) if t.strip()]:
+        p = parse(seg, now)
+        if p.start is None:
+            if p.title and events:
+                # 纯文字残句：并入上一条标题
+                if p.title not in events[-1].title:
+                    events[-1].title = f"{events[-1].title}（{p.title}）"
+                continue
+            if p.title and not events:
+                events.append(p)  # 首句就无时间：保留，让上层提示补全
+                continue
+            continue
+        # 无显式日期但有时刻 → 继承前一条日期
+        if not p.has_date and prev_date is not None and p.start is not None:
+            shift = dt.datetime.combine(prev_date, dt.time(0)) - dt.datetime.combine(
+                p.start.date(), dt.time(0)
+            )
+            p.start = p.start + shift
+            if p.end is not None:
+                p.end = p.end + shift
+            p.warnings.append("本条未写日期，已按上一条的日期处理，请确认")
+        if p.start is not None:
+            prev_date = p.start.date()
+        events.append(p)
+
+    if shared_loc:
+        for p in events:
+            if not p.location:
+                p.location = shared_loc
+    return events
