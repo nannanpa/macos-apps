@@ -257,7 +257,9 @@ class CalendarKit:
         ok, error = self.store.saveEvent_span_error_(ev, 0, None)
         if not ok:
             raise CalendarError(f"写入日历失败：{error}")
-        return str(ev.eventIdentifier() or ev.calendarItemIdentifier())
+        # 统一返回 calendarItemIdentifier：读回（calendarItemWithIdentifier_）、
+        # 删除、台账对账全部按它查；eventIdentifier 是另一种标识，混用会查不中。
+        return str(ev.calendarItemIdentifier() or ev.eventIdentifier())
 
     # ---------- 读回（终点验收通道） ----------
     def find_events_by_title(
@@ -289,6 +291,9 @@ class CalendarKit:
         out = []
         for i in ids:
             ev = self.store.calendarItemWithIdentifier_(i)
+            if ev is None:
+                # 兼容历史台账里可能存过的 eventIdentifier
+                ev = self.store.eventWithIdentifier_(i)
             if ev is not None:
                 out.append(_event_dict(ev))
         out.sort(key=lambda d: d["start"])

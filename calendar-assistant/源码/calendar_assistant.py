@@ -124,7 +124,7 @@ def run_gui():
     kit = CalendarKit()
 
     root = tk.Tk()
-    root.title("行程助手")
+    root.title("")  # 标题栏不显示文字（对齐原生应用如日历/备忘录的隐藏标题做法）
     root.geometry("900x860")
     root.minsize(800, 720)
     root.configure(bg="#f5f6f8")
@@ -819,8 +819,9 @@ def run_gui():
     # ---------- 管理（一键读取本 App 填报的日程；标题搜索为辅） ----------
     def on_manage():
         win = tk.Toplevel(root)
-        win.title("日程管理（本 App 填报的日程）")
+        win.title("日程管理")
         win.geometry("680x420")
+        win.transient(root)  # 从属主窗口：不单占 Dock 项，且不会被压到主窗口后面
         ttk.Label(win, text="打开即列出经本 App 填报的日程；也可按标题精确查找：").pack(
             anchor="w", padx=8, pady=(8, 2))
         row = ttk.Frame(win)
@@ -858,7 +859,8 @@ def run_gui():
             if removed:
                 var_src.set(f"共 {len(found)} 条（另有 {removed} 条已在日历中不存在，台账已清理）")
             else:
-                var_src.set(f"共 {len(found)} 条（经本 App 填报）")
+                var_src.set(f"共 {len(found)} 条")
+            win.lift()  # 对话框关闭后焦点会回落到主窗口，把管理窗抬回前台
 
         def do_find():
             nonlocal found
@@ -870,6 +872,7 @@ def run_gui():
                 return
             render()
             var_src.set(f"按标题找到 {len(found)} 条")
+            win.lift()
 
         ttk.Button(row, text="查找", command=do_find).pack(side="left", padx=4)
 
@@ -885,14 +888,19 @@ def run_gui():
                 parent=win,
             ):
                 return
-            kit.delete_event(ev["identifier"])
+            try:
+                kit.delete_event(ev["identifier"])
+            except CalendarError as e:
+                messagebox.showerror("删除失败", str(e), parent=win)
+                win.lift()
+                return
             _ledger_remove(ev["identifier"])  # 经本工具删除的条目同步出台账
             load_mine()
 
         frm_m = tk.Frame(win)
         frm_m.pack(pady=4)
         ttk.Button(frm_m, text="删除选中日程", command=do_del).pack(side="left", padx=4)
-        ttk.Button(frm_m, text="重新读取本 App 填报", command=load_mine).pack(side="left", padx=4)
+        ttk.Button(frm_m, text="重新读取", command=load_mine).pack(side="left", padx=4)
         ttk.Label(win, textvariable=var_src).pack(anchor="w", padx=8, pady=(0, 6))
 
         load_mine()
@@ -1018,6 +1026,15 @@ def run_cli(args) -> int:
                 ev["alarm_time"] = _fmt_dt(ev["alarm_time"])
         say(json.dumps(evs, ensure_ascii=False, indent=1))
         return 0
+    if args.cmd == "register-title":
+        # 维护命令：按标题找回日历事件并登记进「本 App 填报」台账
+        # （用于台账损坏/被误清理后的补救，不写入新事件）
+        evs = kit.find_events_by_title(args.title, days_back=30, days_ahead=3650)
+        for ev in evs:
+            _ledger_add(ev["identifier"], ev["title"])
+            say("REGISTERED", ev["identifier"], "«" + ev["title"] + "»", _fmt_dt(ev["start"]))
+        say(f"DONE {len(evs)}")
+        return 0 if evs else 1
     if args.cmd == "delete-title":
         evs = kit.find_events_by_title(args.title)
         if not evs:
@@ -1061,6 +1078,8 @@ def main():
     p_rb.add_argument("--days-ahead", type=int, default=90)
     p_del = _sub("delete-title")
     p_del.add_argument("--title", required=True)
+    p_reg = _sub("register-title")
+    p_reg.add_argument("--title", required=True)
 
     args = ap.parse_args()
     if args.cli:
