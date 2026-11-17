@@ -1,10 +1,10 @@
-# 行程助手 TripAssistant
+# 行程助手 CalendarAssistant
 
 粘贴一段中文会议通知，自动解析出时间、地点、会议名，确认后一键写入 macOS 日历。
 
 ## 下载安装
 
-1. 打开 [Latest Release](https://github.com/nannanpa/macos-apps/releases/latest)，下载 `TripAssistant-x.x.x-arm64.dmg`
+1. 打开 [Latest Release](https://github.com/nannanpa/macos-apps/releases/latest)，下载 `CalendarAssistant-x.x.x-arm64.dmg`
 2. 打开 DMG，把 **行程助手** 拖入 Applications 文件夹
 3. 首次打开：安装包未做公证（ad-hoc 签名），若系统提示"无法验证开发者"，请 **右键点击应用 → 打开 → 打开**，之后不再提示
 4. 首次写入日历时会弹出日历权限申请，点 **允许**
@@ -19,6 +19,7 @@
 - **多事件**：分号/句号分隔的多个行程一次解析成多条
 - **发车提醒**：行程带完全地址时，可按当前位置估算出发时间并提前提醒
 - **界面**：浅色卡片风格；解析结果逐项可改；所有输入框支持右键粘贴
+- **帮助**：菜单栏「帮助」内置离线使用说明；系统帮助项已接管，不会再弹「Help isn't available」
 
 ## 系统要求
 

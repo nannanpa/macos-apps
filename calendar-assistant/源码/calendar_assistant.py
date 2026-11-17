@@ -91,21 +91,43 @@ def run_gui():
     root.minsize(800, 720)
     root.configure(bg="#f5f6f8")
 
-    # 官方页面：GitHub 发布页（作者信息与使用说明的入口，About 面板版权行同样带此地址）
+    # 官方页面：GitHub 仓库子目录（作者信息、使用说明与发布的入口）
     official_url = "https://github.com/nannanpa/macos-apps/releases/latest"
-    readme_url = "https://github.com/nannanpa/macos-apps/tree/main/trip-assistant"
+    readme_url = "https://github.com/nannanpa/macos-apps/tree/main/calendar-assistant"
 
-    # 自定义 Help 菜单（name="help" 成为系统帮助菜单）：不注册帮助手册时，
-    # macOS 默认 Help 项点击会弹「Help isn't available」报错；替换成官方页面/使用说明入口。
     import webbrowser
+
+    # 帮助文档：优先打开包内自带的离线帮助页（--cli/开发环境退回源码目录）
+    def _help_html_path() -> str | None:
+        import os
+        for base in (getattr(sys, "_MEIPASS", None), os.path.dirname(os.path.abspath(__file__))):
+            if not base:
+                continue
+            p = os.path.join(base, "帮助.html")
+            if os.path.exists(p):
+                return p
+        return None
+
+    def open_help():
+        p = _help_html_path()
+        if p:
+            webbrowser.open("file://" + p)
+        else:  # 兜底：包内没带帮助页时打开在线版
+            webbrowser.open(readme_url)
+
+    # 自定义 Help 菜单（name="help" 成为系统帮助菜单）。注意 macOS 会在帮助菜单顶部
+    # 固定放一个「行程助手帮助」项：不接管时点击它弹「Help isn't available」（无 Help Book），
+    # 必须注册 tk::mac::ShowHelp 回调把这一项接到本地帮助页上。
     menubar = tk.Menu(root)
     help_menu = tk.Menu(menubar, name="help", tearoff=0)
+    help_menu.add_command(label="使用说明（本机）", command=open_help)
+    help_menu.add_command(label="使用说明（在线）",
+                          command=lambda: webbrowser.open(readme_url))
     help_menu.add_command(label="官方页面（发布与下载）",
                           command=lambda: webbrowser.open(official_url))
-    help_menu.add_command(label="使用说明（网页）",
-                          command=lambda: webbrowser.open(readme_url))
     menubar.add_cascade(label="帮助", menu=help_menu)
     root.config(menu=menubar)
+    root.createcommand("tk::mac::ShowHelp", open_help)
 
     # 视觉：贴近本机网页工作台的浅色卡片风格（浅灰底 / 白卡 / 细边框 / 蓝色主按钮）
     style = ttk.Style()

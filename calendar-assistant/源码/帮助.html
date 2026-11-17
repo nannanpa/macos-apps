@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>行程助手 · 使用说明</title>
+<style>
+  :root { --ink:#1f2937; --muted:#6b7280; --blue:#2563eb; --bg:#f5f6f8; --card:#ffffff; --line:#e3e6ea; }
+  * { box-sizing: border-box; }
+  body { margin:0; padding:32px 16px 64px; background:var(--bg); color:var(--ink);
+         font-family:"PingFang SC","Helvetica Neue",sans-serif; font-size:15px; line-height:1.75; }
+  .wrap { max-width:760px; margin:0 auto; }
+  h1 { font-size:26px; margin:0 0 4px; }
+  .sub { color:var(--muted); font-size:13px; margin-bottom:28px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px;
+          padding:20px 24px; margin-bottom:18px; }
+  .card h2 { font-size:17px; margin:0 0 10px; }
+  .card p { margin:8px 0; }
+  table { border-collapse:collapse; width:100%; margin:10px 0; font-size:14px; }
+  th, td { border:1px solid var(--line); padding:7px 12px; text-align:left; }
+  th { background:#f0f3f8; font-weight:600; }
+  code { background:#eef2f7; border-radius:4px; padding:1px 6px; font-size:13px;
+         font-family:"SF Mono",Menlo,monospace; color:var(--blue); }
+  .tip { background:#eff6ff; border:1px solid #bfdbfe; border-radius:8px; padding:10px 14px;
+         font-size:13.5px; margin:10px 0; }
+  .muted { color:var(--muted); font-size:13px; }
+  a { color:var(--blue); text-decoration:none; }
+  a:hover { text-decoration:underline; }
+  ul, ol { margin:8px 0; padding-left:22px; }
+  li { margin:4px 0; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>行程助手</h1>
+  <div class="sub">CalendarAssistant · 把一段会议通知变成一条日历行程 · v1.0.1</div>
+
+  <div class="card">
+    <h2>三步上手</h2>
+    <ol>
+      <li>把会议通知原文（微信/邮件/公文里那段话）整段粘贴进「行程信息」输入框，点「解析」。</li>
+      <li>核对解析结果：时间、地点、标题、备注、日历分类，可在下方表单里直接改。</li>
+      <li>点「添加到日历」，确认后写入 macOS 日历，并自动打开可继续输入下一条。</li>
+    </ol>
+    <p class="muted">不用逐字段手填，也不用来回切换应用复制粘贴。</p>
+  </div>
+
+  <div class="card">
+    <h2>时间怎么写都行</h2>
+    <table>
+      <tr><th>你输入</th><th>解析结果</th></tr>
+      <tr><td>明天上午10点</td><td>次日 10:00–11:00（默认 1 小时）</td></tr>
+      <tr><td>11月20日14:30到16:00</td><td>当日起止时间</td></tr>
+      <tr><td>4月7日18:30到8日8:00</td><td>跨天，结束日自动进位</td></tr>
+      <tr><td>下周三下午三点</td><td>按今天推算到下周三 15:00</td></tr>
+      <tr><td>明天（11月17日）上午9点</td><td>括注的绝对日期优先，写 11/17 而不是机械推算</td></tr>
+    </table>
+    <div class="tip">括注绝对日期优先于相对日：通知里写「明天（11月17日）」时，以括号里的 11月17日 为准。</div>
+  </div>
+
+  <div class="card">
+    <h2>标题与备注自动提炼</h2>
+    <ul>
+      <li><b>标题</b>：剥掉「召开/举行/关于/通知」等套话和地点、时间片段，留下会议主体名。如「关于召开2026年春季学期教学工作会议的通知」→ 标题为「2026年春季学期教学工作会议」。</li>
+      <li><b>备注</b>：压缩背景套话与后勤细节，保留主持人、核心议题等关键信息，如「哈校长主持，研究审议××方案」。</li>
+      <li>解析结果框下方表单可直接修改任何字段再写入。</li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <h2>日历分类</h2>
+    <p>启动时读取系统日历的分类列表，按标题关键词（会议、党务、教学、科研、生活等）预判归类，可手动切换。没有对应分类时落到默认日历。</p>
+  </div>
+
+  <div class="card">
+    <h2>出发时间提醒（可选）</h2>
+    <p>行程带完整地址并勾选「按出发时间设提醒」时：取设备当前位置 → 解析目的地 → 估算驾车耗时 → 提醒时刻 = 开始时间 − 路上耗时 − 缓冲分钟。短地址（如「图书馆报告厅」）会自动按所在城市补全。</p>
+    <p class="muted">需要「定位」权限；仅此时使用定位，估算结果仅供出发前参考。</p>
+  </div>
+
+  <div class="card">
+    <h2>权限说明</h2>
+    <ul>
+      <li><b>日历</b>：读取分类列表、写入行程、按标题查回/删除（含验收数据清理）。首次写入时系统弹窗，请允许「完全访问」。</li>
+      <li><b>定位</b>：仅勾选出发提醒且地址完整时使用。拒绝也不影响添加行程本身，只是提醒按固定提前量设定。</li>
+    </ul>
+    <p class="muted">权限被拒绝后可在 系统设置 → 隐私与安全性 → 日历/定位服务 中补开。</p>
+  </div>
+
+  <div class="card">
+    <h2>常见问题</h2>
+    <ul>
+      <li><b>解析结果和我想的不一样？</b>下方表单直接改，改动不影响原文；也可以在输入里把关键信息写得更明确（日期＋时刻）。</li>
+      <li><b>写错了怎么删？</b>用「按标题查询」找到该条，选中后删除；日历 App 里也能直接删。</li>
+      <li><b>点菜单「帮助」没反应或弹英文提示？</b>更新到 v1.0.1 及以上版本，旧版未接管系统帮助项。</li>
+      <li><b>首次打开提示未公证？</b>右键 App →「打开」，或在系统设置 → 隐私与安全性里点「仍要打开」（ad-hoc 签名的免费分发限制）。</li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <h2>关于</h2>
+    <p>© 2026 MA Bin (nannanpa)<br>
+    官方页面与下载：<a href="https://github.com/nannanpa/macos-apps/tree/main/calendar-assistant">github.com/nannanpa/macos-apps</a></p>
+  </div>
+</div>
+</body>
+</html>

@@ -9,7 +9,7 @@ a = Analysis(
     ["calendar_assistant.py"],
     pathex=[],
     binaries=[],
-    datas=[],
+    datas=[("帮助.html", ".")],
     hiddenimports=["calkit", "fuzzy_parser", "geo_helper"],
     hookspath=[],
     hooksconfig={},
@@ -49,18 +49,18 @@ coll = COLLECT(
 app = BUNDLE(
     coll,
     name=f"{APP_NAME}.app",
-    icon=None,
+    icon="../图标/AppIcon.icns",
     bundle_identifier=BUNDLE_ID,
     info_plist={
         "CFBundleDisplayName": APP_NAME,
         "CFBundleName": APP_NAME,
-        "CFBundleShortVersionString": "1.0.0",
-        "CFBundleVersion": "1.0.0",
+        "CFBundleShortVersionString": "1.0.1",
+        "CFBundleVersion": "1.0.1",
         "LSMinimumSystemVersion": "12.0",
         "NSHighResolutionCapable": True,
         "LSApplicationCategoryType": "public.app-category.productivity",
-        # 「关于」面板版权行：作者 + 官方页面（macOS 标准 About 面板直接展示此键）
-        "NSHumanReadableCopyright": "© 2026 MA Bin (nannanpa) · 官方页面 github.com/nannanpa/macos-apps",
+        # 「关于」面板版权行：作者一行 + 官方页面一行（\n 换行，避免长 URL 挤成一行截断）
+        "NSHumanReadableCopyright": "© 2026 MA Bin (nannanpa)\n官方页面 github.com/nannanpa/macos-apps/tree/main/calendar-assistant",
         # ---- TCC 声明键（D4 根治；首次运行触发系统授权弹窗，A5）----
         "NSCalendarsUsageDescription": "行程助手需要读取您的日历分类列表，并把您确认的行程写入对应日历。",
         "NSCalendarsFullAccessUsageDescription": "行程助手需要读写日历事件：写入您确认的行程，并支持按标题查找/删除（含验收测试数据清理）。",
