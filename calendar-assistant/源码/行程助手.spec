@@ -54,8 +54,8 @@ app = BUNDLE(
     info_plist={
         "CFBundleDisplayName": APP_NAME,
         "CFBundleName": APP_NAME,
-        "CFBundleShortVersionString": "1.0.1",
-        "CFBundleVersion": "1.0.1",
+        "CFBundleShortVersionString": "1.1.0",
+        "CFBundleVersion": "1.1.0",
         "LSMinimumSystemVersion": "12.0",
         "NSHighResolutionCapable": True,
         "LSApplicationCategoryType": "public.app-category.productivity",

@@ -19,6 +19,8 @@ from EventKit import (
     EKEvent,
     EKEventStore,
     EKRecurrenceRule,
+    EKRecurrenceEnd,
+    EKRecurrenceDayOfWeek,
     EKRecurrenceFrequencyDaily,
     EKRecurrenceFrequencyWeekly,
     EKRecurrenceFrequencyMonthly,
@@ -36,6 +38,71 @@ _RECUR_FREQ = {
     "yearly": EKRecurrenceFrequencyYearly,
 }
 _FREQ_LABEL = {"daily": "每天", "weekly": "每周", "monthly": "每月", "yearly": "每年"}
+_FREQ_UNIT = {"daily": "天", "weekly": "周", "monthly": "月", "yearly": "年"}
+_FREQ_INT_KEY = {int(v): k for k, v in _RECUR_FREQ.items()}  # 频率常量 → 'daily' 等
+# EKRecurrenceDayOfWeek 用 1=周日…7=周六（NSCalendar weekday 约定）
+_EK_DOW = {"周日": 1, "周一": 2, "周二": 3, "周三": 4, "周四": 5, "周五": 6, "周六": 7}
+_DOW_CN = {v: k for k, v in _EK_DOW.items()}
+
+
+def _build_recurrence_rule(recur):
+    """构造 EKRecurrenceRule。
+
+    recur 接受三种形态：
+    - None：不重复；
+    - str：预设键（daily/weekly/monthly/yearly），每 1 个周期、无结束；
+    - dict：自定义 {"freq": 键, "interval": N, "weekdays": ["周一",...],
+      "count": 共N次, "until": datetime 截止}（count/until 二选一，均可省）。
+    构造失败返回 None（不抛错，宁可不重复也别写坏）。
+    """
+    if not recur:
+        return None
+    if isinstance(recur, str):
+        if recur not in _RECUR_FREQ:
+            return None
+        freq, interval, weekdays, count, until = _RECUR_FREQ[recur], 1, [], None, None
+    else:
+        key = recur.get("freq", "")
+        if key not in _RECUR_FREQ:
+            return None
+        freq = _RECUR_FREQ[key]
+        interval = max(1, int(recur.get("interval") or 1))
+        weekdays = [w for w in (recur.get("weekdays") or []) if w in _EK_DOW]
+        count = recur.get("count") or None
+        until = recur.get("until") or None
+    dows = None
+    if weekdays:
+        dows = [EKRecurrenceDayOfWeek.dayOfWeek_weekNumber_(_EK_DOW[w], 0) for w in weekdays]
+    end = None
+    if count:
+        end = EKRecurrenceEnd.alloc().initWithOccurrenceCount_(int(count))
+    elif until is not None:
+        end = EKRecurrenceEnd.alloc().initWithEndDate_(_nsdate(until))
+    return EKRecurrenceRule.alloc().initRecurrenceWithFrequency_interval_daysOfTheWeek_daysOfTheMonth_monthsOfTheYear_weeksOfTheYear_daysOfTheYear_setPositions_end_(
+        freq, interval, dows, None, None, None, None, None, end,
+    )
+
+
+def _rule_label(r) -> str:
+    """读回：把存储端规则翻成中文摘要（如「每2周（周一、周三）·共10次」）。"""
+    key = _FREQ_INT_KEY.get(int(r.frequency()))
+    if not key:
+        return "重复"
+    interval = max(1, int(r.interval() or 1))
+    label = _FREQ_LABEL[key] if interval == 1 else f"每{interval}{_FREQ_UNIT[key]}"
+    dows = r.daysOfTheWeek()
+    if dows:
+        label += "（" + "、".join(_DOW_CN.get(int(d.dayOfTheWeek()), "?") for d in dows) + "）"
+    end = r.recurrenceEnd()
+    if end is not None:
+        d = end.endDate()
+        if d is not None:
+            label += f"·至{_from_nsdate(d).strftime('%Y-%m-%d')}"
+        else:
+            c = int(end.occurrenceCount() or 0)
+            if c:
+                label += f"·共{c}次"
+    return label
 
 _AUTH_NAME = {0: "未决定", 1: "受限", 2: "拒绝", 3: "已授权(完整)", 4: "已授权(仅写入)"}
 
@@ -129,11 +196,11 @@ class CalendarKit:
         location: str = "",
         notes: str = "",
         alarm_at: _dt.datetime | None = None,
-        recur: str | None = None,
+        recur: str | dict | None = None,
     ) -> str:
         """写入事件。日期用 NSDate 直接构造，不经字符串拼接。返回事件标识。
 
-        recur：重复规则（daily/weekly/monthly/yearly，None=不重复）。
+        recur：重复规则（见 _build_recurrence_rule 三种形态，None=不重复）。
         """
         if end <= start:
             raise CalendarError("结束时间必须晚于开始时间。")
@@ -149,10 +216,8 @@ class CalendarKit:
             ev.setNotes_(notes)
         if alarm_at is not None:
             ev.addAlarm_(EKAlarm.alarmWithAbsoluteDate_(_nsdate(alarm_at)))
-        if recur in _RECUR_FREQ:
-            rule = EKRecurrenceRule.alloc().initWithRecurrenceWithFrequency_interval_end_(
-                _RECUR_FREQ[recur], 1, None
-            )
+        rule = _build_recurrence_rule(recur)
+        if rule is not None:
             ev.addRecurrenceRule_(rule)
         ok, error = self.store.saveEvent_span_error_(ev, 0, None)
         if not ok:
@@ -195,7 +260,7 @@ class CalendarKit:
                             else None
                         ),
                         "recur": next(
-                            (_FREQ_LABEL[int(r.frequency())] for r in (ev.recurrenceRules() or [])),
+                            (_rule_label(r) for r in (ev.recurrenceRules() or [])),
                             "",
                         ),
                     }

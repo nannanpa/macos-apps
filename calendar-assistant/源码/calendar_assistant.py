@@ -350,12 +350,12 @@ def run_gui():
     ent_notes.grid(row=5, column=1, sticky="w", pady=5, columnspan=2)
 
     lbl(6, "重复：")
-    cmb_recur = ttk.Combobox(grid, state="readonly", width=10, font=FONT,
-                             values=("不重复", "每天", "每周", "每月", "每年"))
+    cmb_recur = ttk.Combobox(grid, state="readonly", width=14, font=FONT,
+                             values=("不重复", "每天", "每周", "每月", "每年", "自定义…"))
     cmb_recur.set("不重复")
     cmb_recur.grid(row=6, column=1, sticky="w", pady=5)
-    tk.Label(grid, text="「每周三例会」这类表述会自动预选", font=FONT_SM, bg=CARD, fg=MUTED).grid(
-        row=6, column=2, sticky="w", padx=(10, 0))
+    tk.Label(grid, text="循环表述自动预选；自定义可设隔N周/星期几/次数/截止",
+             font=FONT_SM, bg=CARD, fg=MUTED).grid(row=6, column=2, sticky="w", padx=(10, 0))
 
     var_alarm = tk.BooleanVar(value=False)
     chk_alarm = ttk.Checkbutton(grid, text="按出发时间设提醒（完全地址＋可定位时自动计算）",
@@ -423,11 +423,147 @@ def run_gui():
             ent_notes.delete(0, "end")
             ent_notes.insert(0, p.notes)
         cmb_recur.set(_RECUR_LABEL.get(p.recur, "不重复"))
+        state["recur_custom"] = None
         if p.calendar_hint:
             for name in state["calendars"]:
                 if p.calendar_hint in name or name in p.calendar_hint:
                     cmb_cal.set(name)
                     break
+
+    # ---------- 自定义重复 ----------
+    def on_recur_selected(event=None):
+        val = cmb_recur.get()
+        if val == "自定义…":
+            open_custom_recur()
+        else:
+            state["recur_last"] = val
+            state["recur_custom"] = None
+
+    def open_custom_recur():
+        prev_spec = dict((state.get("recur_custom") or {}).get("spec") or {})
+        dlg = tk.Toplevel(root)
+        dlg.title("自定义重复")
+        dlg.configure(bg=CARD)
+        dlg.transient(root)
+        dlg.resizable(False, False)
+        frm = tk.Frame(dlg, bg=CARD, padx=16, pady=12)
+        frm.pack(fill="both", expand=True)
+
+        # 第 1 行：每 [N] [天/周/月/年]
+        row1 = tk.Frame(frm, bg=CARD)
+        row1.pack(anchor="w", pady=(0, 10))
+        tk.Label(row1, text="每", font=FONT, bg=CARD, fg=INK).pack(side="left")
+        spin_n = tk.Spinbox(row1, from_=1, to=99, width=4, font=FONT,
+                            justify="center")
+        spin_n.delete(0, "end")
+        spin_n.insert(0, str(prev_spec.get("interval") or 1))
+        spin_n.pack(side="left", padx=4)
+        cmb_unit = ttk.Combobox(row1, state="readonly", width=5, font=FONT,
+                                values=("天", "周", "月", "年"))
+        cmb_unit.set({"daily": "天", "weekly": "周", "monthly": "月", "yearly": "年"}.get(
+            prev_spec.get("freq") or "weekly", "周"))
+        cmb_unit.pack(side="left")
+
+        # 第 2 行：每周时勾星期几（其余频率置灰）
+        row2 = tk.Frame(frm, bg=CARD)
+        row2.pack(anchor="w", pady=(0, 10))
+        tk.Label(row2, text="在：", font=FONT, bg=CARD, fg=INK).pack(side="left")
+        wd_vars = {}
+        for name in ("周一", "周二", "周三", "周四", "周五", "周六", "周日"):
+            v = tk.BooleanVar(value=name in (prev_spec.get("weekdays") or []))
+            wd_vars[name] = v
+            tk.Checkbutton(row2, text=name[1:], variable=v, font=FONT_SM,
+                           bg=CARD, fg=INK, activebackground=CARD,
+                           selectcolor="#ffffff").pack(side="left")
+
+        def sync_wd(*_):
+            for w in row2.winfo_children():
+                if isinstance(w, tk.Checkbutton):
+                    w.config(state="normal" if cmb_unit.get() == "周" else "disabled")
+        cmb_unit.bind("<<ComboboxSelected>>", sync_wd)
+
+        # 第 3 行：结束条件
+        row3 = tk.Frame(frm, bg=CARD)
+        row3.pack(anchor="w", pady=(0, 10))
+        tk.Label(row3, text="结束：", font=FONT, bg=CARD, fg=INK).pack(side="left")
+        var_end = tk.StringVar(
+            value="count" if prev_spec.get("count") else ("until" if prev_spec.get("until") else "forever"))
+        for text, val in (("永不", "forever"), ("共", "count"), ("直到", "until")):
+            tk.Radiobutton(row3, text=text, value=val, variable=var_end,
+                           font=FONT_SM, bg=CARD, fg=INK, activebackground=CARD,
+                           selectcolor="#ffffff").pack(side="left")
+        ent_count = tk.Entry(row3, width=4, font=FONT, justify="center")
+        ent_count.insert(0, str(prev_spec.get("count") or 10))
+        ent_count.pack(side="left", padx=2)
+        tk.Label(row3, text="次  ", font=FONT, bg=CARD, fg=INK).pack(side="left")
+        ent_until = tk.Entry(row3, width=12, font=FONT, justify="center")
+        _pu = prev_spec.get("until")
+        ent_until.insert(0, _pu.strftime("%Y-%m-%d") if hasattr(_pu, "strftime") else "2027-12-31")
+        ent_until.pack(side="left", padx=2)
+        sync_wd()
+
+        def on_ok():
+            try:
+                n = int(spin_n.get())
+                if not 1 <= n <= 99:
+                    raise ValueError
+            except ValueError:
+                messagebox.showwarning("自定义重复", "间隔须为 1–99 的整数。", parent=dlg)
+                return
+            unit = cmb_unit.get()
+            weekdays = [k for k, v in wd_vars.items() if v.get()] if unit == "周" else []
+            mode = var_end.get()
+            count = until = None
+            try:
+                if mode == "count":
+                    count = int(ent_count.get())
+                    if not count >= 1:
+                        raise ValueError
+                elif mode == "until":
+                    until = dt.datetime.strptime(ent_until.get().strip(), "%Y-%m-%d")
+            except ValueError:
+                messagebox.showwarning(
+                    "自定义重复",
+                    "次数须为正整数；截止日期格式为 YYYY-MM-DD。" if mode == "until"
+                    else "次数须为正整数。",
+                    parent=dlg)
+                return
+            spec = {"freq": {"天": "daily", "周": "weekly", "月": "monthly", "年": "yearly"}[unit],
+                    "interval": n}
+            if weekdays:
+                spec["weekdays"] = weekdays
+            if count:
+                spec["count"] = count
+            if until:
+                spec["until"] = until
+            label = ("每" + unit) if n == 1 else f"每{n}{unit}"
+            if weekdays:
+                label += "（" + "、".join(weekdays) + "）"
+            if count:
+                label += f"·共{count}次"
+            if until:
+                label += f"·至{until.strftime('%Y-%m-%d')}"
+            state["recur_custom"] = {"spec": spec, "label": label}
+            cmb_recur.set(label)
+            dlg.destroy()
+
+        def on_cancel():
+            # 取消：恢复进入对话框前的显示（自定义摘要 > 上次预设 > 不重复）
+            if state.get("recur_custom"):
+                cmb_recur.set(state["recur_custom"]["label"])
+            else:
+                cmb_recur.set(state.get("recur_last", "不重复"))
+            dlg.destroy()
+
+        rowbtn = tk.Frame(frm, bg=CARD)
+        rowbtn.pack(anchor="e", pady=(4, 0))
+        tk.Button(rowbtn, text="取消", font=FONT, bg=CARD, fg=INK, relief="solid",
+                  bd=1, command=on_cancel).pack(side="left", padx=6)
+        tk.Button(rowbtn, text="确定", font=FONT, bg=BLUE, fg="#ffffff",
+                  relief="flat", command=on_ok).pack(side="left")
+        dlg.grab_set()
+
+    cmb_recur.bind("<<ComboboxSelected>>", on_recur_selected)
 
     def on_parse():
         raw = ent_raw.get().strip()
@@ -515,8 +651,16 @@ def run_gui():
         elif var_alarm.get() and not loc:
             plan_lines = ["⚠ 勾选了出发提醒但未填地点，未设提醒"]
 
-        recur_label = cmb_recur.get() if cmb_recur.get() != "不重复" else ""
-        recur = {"每天": "daily", "每周": "weekly", "每月": "monthly", "每年": "yearly"}.get(recur_label)
+        sel = cmb_recur.get()
+        cust = state.get("recur_custom") or {}
+        preset = {"每天": "daily", "每周": "weekly", "每月": "monthly", "每年": "yearly"}.get(sel)
+        if sel not in ("不重复", "每天", "每周", "每月", "每年"):
+            # 自定义摘要（如「每2周（周一、周三）·共10次」）
+            recur, recur_label = cust.get("spec"), cust.get("label") or sel
+        elif preset:
+            recur, recur_label = preset, sel
+        else:
+            recur, recur_label = None, ""
 
         msg = (
             f"日历：{cal}\n标题：{title}\n开始：{_fmt_dt(start)}\n结束：{_fmt_dt(end)}"
@@ -566,6 +710,7 @@ def run_gui():
         for w in (ent_title, ent_start, ent_end, ent_loc, ent_notes):
             w.delete(0, "end")
         cmb_recur.set("不重复")
+        state["recur_custom"] = None
         state["events"] = []
         state["eidx"] = 0
         update_multi_nav()
