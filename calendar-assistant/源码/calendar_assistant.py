@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import json
+import os
 import sys
 
 from calkit import CalendarKit, CalendarError
@@ -24,6 +25,43 @@ import geo_helper
 
 
 TEST_PREFIX = "WB验收-可删"
+
+
+# ==================== 写入台账（「日程管理→一键读取」的依据） ====================
+# EventKit 无法区分事件出自哪个 App，故每次经本工具写入成功后把事件标识记入本地台账；
+# 管理窗口只按台账读取，口径=「经本 App 填报的日程」。
+
+def _ledger_path() -> str:
+    d = os.path.expanduser("~/Library/Application Support/CalendarAssistant")
+    os.makedirs(d, exist_ok=True)
+    return os.path.join(d, "written.json")
+
+
+def _ledger_load() -> list[dict]:
+    try:
+        with open(_ledger_path(), encoding="utf-8") as f:
+            items = json.load(f)
+        return items if isinstance(items, list) else []
+    except Exception:
+        return []
+
+
+def _ledger_save(items: list[dict]) -> None:
+    with open(_ledger_path(), "w", encoding="utf-8") as f:
+        json.dump(items, f, ensure_ascii=False, indent=1)
+
+
+def _ledger_add(ident: str, title: str) -> None:
+    items = _ledger_load()
+    if not any(x.get("id") == ident for x in items):
+        items.append({"id": ident, "title": title,
+                      "at": dt.datetime.now().isoformat(timespec="seconds")})
+        _ledger_save(items)
+
+
+def _ledger_remove(ident: str) -> None:
+    items = [x for x in _ledger_load() if x.get("id") != ident]
+    _ledger_save(items)
 
 
 def _fmt_dt(d: dt.datetime | None) -> str:
@@ -259,10 +297,9 @@ def run_gui():
 
     header = tk.Frame(root, bg=CARD, height=46)
     header.pack(fill="x", side="top")
-    tk.Label(header, text="行程助手", font=("PingFang SC", 16, "bold"), bg=CARD, fg=INK).pack(
-        side="left", padx=(22, 12), pady=10)
+    # macOS 惯例：banner 不放应用名（窗口标题栏已有），只留一句功能说明
     tk.Label(header, text="一句话生成日程 · 本机日历写入 · 数据不上传",
-             font=FONT_SM, bg=CARD, fg=MUTED).pack(side="left", pady=10)
+             font=FONT_SM, bg=CARD, fg=MUTED).pack(side="left", padx=(22, 12), pady=10)
 
     # 滚动容器：内容高于屏幕工作区时在窗口内滚动，底部按钮/状态栏永不被裁
     view = tk.Frame(root, bg=BG)
@@ -293,6 +330,18 @@ def run_gui():
     body.bind("<Configure>", _fit_canvas)
 
     def _on_wheel(e):
+        # 内容不超容器时完全不劫持滚轮；指针在解析框等自带滚动的文本域上时也不干预
+        region = canvas.bbox("all")
+        if not region or region[3] - region[1] <= canvas.winfo_height():
+            return
+        try:
+            w = root.winfo_containing(e.x_root, e.y_root)
+        except KeyError:
+            w = None
+        while w is not None:
+            if isinstance(w, tk.Text):
+                return  # 解析框自己滚
+            w = w.master
         canvas.yview_scroll(-1 if e.delta > 0 else 1, "units")
 
     canvas.bind_all("<MouseWheel>", _on_wheel)
@@ -340,9 +389,7 @@ def run_gui():
 
     lbl(2, "开始时间：")
     ent_start = ttk.Entry(grid, width=22, font=FONT)
-    ent_start.grid(row=2, column=1, sticky="w", pady=2)
-    tk.Label(grid, text="格式 YYYY-MM-DD HH:MM", font=FONT_SM, bg=CARD, fg=MUTED).grid(
-        row=2, column=2, sticky="w", padx=(10, 0))
+    ent_start.grid(row=2, column=1, sticky="w", pady=2, columnspan=2)
 
     lbl(3, "结束时间：")
     ent_end = ttk.Entry(grid, width=22, font=FONT)
@@ -361,8 +408,8 @@ def run_gui():
                              values=("不重复", "每天", "每周", "每月", "每年", "自定义…"))
     cmb_recur.set("不重复")
     cmb_recur.grid(row=6, column=1, sticky="w", pady=2)
-    tk.Label(grid, text="循环表述自动预选；自定义可设隔N周/星期几/次数/截止",
-             font=FONT_SM, bg=CARD, fg=MUTED).grid(row=6, column=2, sticky="w", padx=(10, 0))
+    tk.Label(grid, text="循环表述自动预选", font=FONT_SM, bg=CARD, fg=MUTED).grid(
+        row=6, column=2, sticky="w", padx=(10, 0))
 
     # 提醒1（出发提醒）＋提前缓冲合并一行；提醒2 为第二道提醒（同 EventKit 的「另一次提醒」）
     var_alarm = tk.BooleanVar(value=False)
@@ -728,6 +775,7 @@ def run_gui():
             messagebox.showerror("写入失败", str(e))
             set_status(str(e), err=True)
             return
+        _ledger_add(ident, title)  # 登记「本 App 填报」台账，供日程管理一键读取
         # 写入后立即读回（终点自校验，防 D2 复发）
         back = kit.find_events_by_title(title, days_back=1, days_ahead=730)
         line = f"✅ 已写入「{title}」（标识 {ident[:16]}…）。"
@@ -768,12 +816,13 @@ def run_gui():
         clear_input_area()
         set_status("已清空，可输入下一条行程。")
 
-    # ---------- 管理（读回/删除，供验收与测试数据清理） ----------
+    # ---------- 管理（一键读取本 App 填报的日程；标题搜索为辅） ----------
     def on_manage():
         win = tk.Toplevel(root)
-        win.title("日程管理（读回 / 删除）")
+        win.title("日程管理（本 App 填报的日程）")
         win.geometry("680x420")
-        ttk.Label(win, text="按标题精确查找：").pack(anchor="w", padx=8, pady=(8, 2))
+        ttk.Label(win, text="打开即列出经本 App 填报的日程；也可按标题精确查找：").pack(
+            anchor="w", padx=8, pady=(8, 2))
         row = ttk.Frame(win)
         row.pack(fill="x", padx=8)
         ent_q = ttk.Entry(row, width=40)
@@ -781,21 +830,46 @@ def run_gui():
         lst = tk.Listbox(win, height=14)
         lst.pack(fill="both", expand=True, padx=8, pady=6)
         found: list[dict] = []
+        var_src = tk.StringVar(value="")
 
-        def refresh():
+        def render():
             lst.delete(0, "end")
-            q = ent_q.get().strip()
-            nonlocal found
-            found = kit.find_events_by_title(q) if q else []
             for i, ev in enumerate(found):
                 lst.insert("end", f"{_fmt_dt(ev['start'])} ~ {_fmt_dt(ev['end'])}  [{ev['calendar']}]  {ev['title']}"
                            + (f"（{ev['recur']}）" if ev.get("recur") else ""))
 
-        def do_find():
+        def load_mine():
+            nonlocal found
+            var_src.set("读取中…")
+            ids = [x["id"] for x in _ledger_load()]
             try:
-                refresh()
+                found = kit.get_events_by_identifiers(ids) if ids else []
+            except CalendarError as e:
+                messagebox.showerror("读取失败", str(e), parent=win)
+                found = []
+            # 台账里已不存在（被手动删掉）的标识顺手清掉，保持台账与日历一致
+            live = {ev["identifier"] for ev in found}
+            removed = 0
+            for x in _ledger_load():
+                if x["id"] not in live:
+                    _ledger_remove(x["id"])
+                    removed += 1
+            render()
+            if removed:
+                var_src.set(f"共 {len(found)} 条（另有 {removed} 条已在日历中不存在，台账已清理）")
+            else:
+                var_src.set(f"共 {len(found)} 条（经本 App 填报）")
+
+        def do_find():
+            nonlocal found
+            q = ent_q.get().strip()
+            try:
+                found = kit.find_events_by_title(q) if q else []
             except CalendarError as e:
                 messagebox.showerror("查询失败", str(e), parent=win)
+                return
+            render()
+            var_src.set(f"按标题找到 {len(found)} 条")
 
         ttk.Button(row, text="查找", command=do_find).pack(side="left", padx=4)
 
@@ -812,9 +886,16 @@ def run_gui():
             ):
                 return
             kit.delete_event(ev["identifier"])
-            do_find()
+            _ledger_remove(ev["identifier"])  # 经本工具删除的条目同步出台账
+            load_mine()
 
-        ttk.Button(win, text="删除选中日程", command=do_del).pack(pady=4)
+        frm_m = tk.Frame(win)
+        frm_m.pack(pady=4)
+        ttk.Button(frm_m, text="删除选中日程", command=do_del).pack(side="left", padx=4)
+        ttk.Button(frm_m, text="重新读取本 App 填报", command=load_mine).pack(side="left", padx=4)
+        ttk.Label(win, textvariable=var_src).pack(anchor="w", padx=8, pady=(0, 6))
+
+        load_mine()
 
     # ---------- 布局按钮 ----------
     def btn(parent, text, cmd, kind="ghost", **kw):
@@ -920,6 +1001,7 @@ def run_cli(args) -> int:
                     (p.start - dt.timedelta(minutes=args.alarm2)) if args.alarm2 else None,
                     args.url or "", args.recur or None,
                 )
+                _ledger_add(ident, title)  # CLI 写入同样登记台账
                 say(f"[{i}/{n}] ADDED", ident, "«" + title + "»",
                     f"{_fmt_dt(p.start)}~{_fmt_dt(p.end or p.start + dt.timedelta(hours=1))}")
                 ok += 1

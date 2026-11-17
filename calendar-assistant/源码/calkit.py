@@ -120,6 +120,31 @@ def _from_nsdate(ns) -> _dt.datetime:
     return _dt.datetime.fromtimestamp(ns.timeIntervalSince1970())
 
 
+def _event_dict(ev) -> dict:
+    """EKEvent → 展示用字典（find_events_by_title / get_events_by_identifiers 共用）。"""
+    return {
+        "identifier": str(ev.calendarItemIdentifier()),
+        "title": str(ev.title()),
+        "calendar": str(ev.calendar().title()),
+        "start": _from_nsdate(ev.startDate()),
+        "end": _from_nsdate(ev.endDate()),
+        "location": str(ev.location()) if ev.location() else "",
+        "notes": str(ev.notes()) if ev.notes() else "",
+        "has_alarm": bool(ev.alarms() and len(ev.alarms()) > 0),
+        "alarm_time": (
+            _from_nsdate(ev.alarms()[0].absoluteDate())
+            if ev.alarms() and ev.alarms()[0].absoluteDate()
+            else None
+        ),
+        "n_alarms": len(ev.alarms() or []),
+        "url": str(ev.URL()) if ev.URL() else "",
+        "recur": next(
+            (_rule_label(r) for r in (ev.recurrenceRules() or [])),
+            "",
+        ),
+    }
+
+
 def _wait(result: dict, timeout: float = 60.0) -> dict:
     """泵主 runloop，直到 result 里出现 '_done' 或超时。"""
     rl = Foundation.NSRunLoop.currentRunLoop()
@@ -254,29 +279,18 @@ class CalendarKit:
         out = []
         for ev in events:
             if str(ev.title()) == title:
-                out.append(
-                    {
-                        "identifier": str(ev.calendarItemIdentifier()),
-                        "title": str(ev.title()),
-                        "calendar": str(ev.calendar().title()),
-                        "start": _from_nsdate(ev.startDate()),
-                        "end": _from_nsdate(ev.endDate()),
-                        "location": str(ev.location()) if ev.location() else "",
-                        "notes": str(ev.notes()) if ev.notes() else "",
-                        "has_alarm": bool(ev.alarms() and len(ev.alarms()) > 0),
-                        "alarm_time": (
-                            _from_nsdate(ev.alarms()[0].absoluteDate())
-                            if ev.alarms() and ev.alarms()[0].absoluteDate()
-                            else None
-                        ),
-                        "n_alarms": len(ev.alarms() or []),
-                        "url": str(ev.URL()) if ev.URL() else "",
-                        "recur": next(
-                            (_rule_label(r) for r in (ev.recurrenceRules() or [])),
-                            "",
-                        ),
-                    }
-                )
+                out.append(_event_dict(ev))
+        out.sort(key=lambda d: d["start"])
+        return out
+
+    def get_events_by_identifiers(self, ids: list[str]) -> list[dict]:
+        """按事件标识批量读回（只查本 App 写入过的，标识来自本地台账）。"""
+        self.request_access()
+        out = []
+        for i in ids:
+            ev = self.store.calendarItemWithIdentifier_(i)
+            if ev is not None:
+                out.append(_event_dict(ev))
         out.sort(key=lambda d: d["start"])
         return out
 
