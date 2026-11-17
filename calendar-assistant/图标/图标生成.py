@@ -53,8 +53,8 @@ def draw_text_center(img, xy, text, f, fill):
 def make_a():
     """方向 A：日历 + 右下角定位针（针作角标，不压数字）"""
     img, band_h = paste_band(base_card())
-    draw_text_center(img, (512, 130), "十一月", font(CN_FONT, 118), WHITE)
-    draw_text_center(img, (460, 470), "17", font(NUM_FONT, 620, index=1), INK)
+    draw_text_center(img, (512, 130), "三月", font(CN_FONT, 118), WHITE)
+    draw_text_center(img, (460, 470), "22", font(NUM_FONT, 620, index=1), INK)
     # 定位针：圆头（带白孔）+ 下探针尾，右下角出血（越出卡面裁掉一部分，读作角标）
     d = ImageDraw.Draw(img)
     cx, cy, r = int(0.80 * S), int(0.78 * S), int(0.115 * S)
@@ -68,8 +68,8 @@ def make_a():
 def make_b():
     """方向 B：日历 + 两条行程块（一蓝一灰）"""
     img, band_h = paste_band(base_card())
-    draw_text_center(img, (512, 130), "十一月", font(CN_FONT, 118), WHITE)
-    draw_text_center(img, (512, 460), "17", font(NUM_FONT, 560, index=1), INK)
+    draw_text_center(img, (512, 130), "三月", font(CN_FONT, 118), WHITE)
+    draw_text_center(img, (512, 460), "22", font(NUM_FONT, 560, index=1), INK)
     d = ImageDraw.Draw(img)
     m, bw, bh, br = int(0.12 * S), int(0.56 * S), int(0.062 * S), int(0.031 * S)
     y1, y2 = int(0.685 * S), int(0.80 * S)

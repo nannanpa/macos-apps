@@ -516,7 +516,7 @@ def refine_title(title: str) -> tuple[str, str]:
         if _RE_BG_CLAUSE.match(seg) or _RE_LOGISTICS.search(seg):
             continue  # 背景套话与后勤说明不进备注：不承载议题/主持信息
         n = _RE_MEET.sub("", seg).strip(" ，,")
-        n = _RE_HOST_TAIL.sub(r"\1", n)  # 「哈校长主持会议」→「哈校长主持」
+        n = _RE_HOST_TAIL.sub(r"\1", n)  # 「李经理主持会议」→「李经理主持」
         if n:
             notes.append(n)
     return meet, "，".join(notes)
