@@ -29,6 +29,36 @@ import geo_helper
 
 TEST_PREFIX = "WB验收-可删"
 
+# ==================== 主题：跟随 macOS 浅色/深色外观 ====================
+# 界面配色集中在 PALETTES，启动时按系统外观选一套；运行中若用户切换外观，
+# refresh_theme 按「旧色值→新色值」映射遍历刷新全部控件（含 Canvas 自绘按钮），
+# 不重启、不丢输入。ttk 原生控件交给系统默认主题（深色下自动黑底白字），
+# 只对自绘部分显式设色。
+PALETTES = {
+    "light": dict(BG="#f5f6f8", CARD="#ffffff", LINE="#e3e6ea",
+                  INK="#1f2937", MUTED="#6b7280", BLUE="#2563eb",
+                  BLUE_DARK="#1d4ed8", SOFT="#eef2f7", SOFT2="#eef0f3",
+                  DIS_FG="#9aa3af", DANGER="#dc2626", SEL_BG="#dbeafe"),
+    "dark":  dict(BG="#1e1e20", CARD="#2c2c2d", LINE="#454548",
+                  INK="#e8e8ea", MUTED="#9a9aa2", BLUE="#3b82f6",
+                  BLUE_DARK="#60a5fa", SOFT="#38383b", SOFT2="#3a3a3d",
+                  DIS_FG="#77777e", DANGER="#f87171", SEL_BG="#3b5b8c"),
+}
+
+
+def system_theme() -> str:
+    """读 macOS 外观设置，返回 'dark' 或 'light'；非 macOS 或读取失败按浅色。"""
+    try:
+        import subprocess
+        out = subprocess.run(["defaults", "read", "-g", "AppleInterfaceStyle"],
+                             capture_output=True, text=True, timeout=2)
+        return "dark" if out.stdout.strip().lower() == "dark" else "light"
+    except Exception:
+        return "light"
+
+
+THEME = PALETTES[system_theme()]
+
 # 作息对照表窗口单例引用（防止从菜单重复打开多个窗口）
 _periods_win = None
 
@@ -196,6 +226,84 @@ def plan_alarm(location: str, start: dt.datetime, buffer_min: int) -> dict:
 
 # ==================== GUI ====================
 
+# 主题刷新：系统外观变化后，把窗口树里所有"属于旧配色"的颜色换成新配色。
+# 判定靠颜色值精确匹配旧色表，不动任何字体/尺寸，也不重建控件，故输入内容不丢。
+def _theme_recolor(widget, old: dict, new: dict):
+    """递归刷新一个控件及其子控件的颜色属性。返回是否发生了改动。"""
+    import tkinter as tk
+    changed = False
+    # 反查表：旧色值 -> 新色值（大小写归一）
+    rev = {v.lower(): new[k] for k, v in old.items()}
+
+    def recolor_attrs(w):
+        nonlocal changed
+        # 这些属性接受颜色；逐个读当前值，命中旧色表才换
+        for attr in ("bg", "foreground", "activebackground", "activeforeground",
+                     "selectbackground", "selectforeground", "highlightbackground",
+                     "readonlybackground", "fieldbackground", "selectcolor"):
+            try:
+                cur = str(w.cget(attr))
+            except Exception:
+                continue
+            if cur.lower() in rev and rev[cur.lower()] != cur:
+                try:
+                    w.configure(**{attr: rev[cur.lower()]})
+                    changed = True
+                except Exception:
+                    pass
+
+    # Canvas 自绘按钮：颜色存在实例字段里，先更新字段再重绘
+    def recolor_flat(w):
+        nonlocal changed
+        if not hasattr(w, "_fill") or not hasattr(w, "_paint"):
+            return
+        for field in ("_fill", "_fg", "_hover_fill", "_hover_fg",
+                      "_dis_fill", "_dis_fg", "_outline"):
+            cur = getattr(w, field, None)
+            if isinstance(cur, str) and cur.lower() in rev:
+                setattr(w, field, rev[cur.lower()])
+                changed = True
+        # primary 的字色是字面 "white"，两主题都适用，无需改
+        try:
+            w._paint()
+        except Exception:
+            pass
+
+    def walk(w):
+        recolor_attrs(w)
+        recolor_flat(w)
+        for c in w.winfo_children():
+            walk(c)
+
+    walk(widget)
+    return changed
+
+
+def _theme_watch(root, get_roots):
+    """每 2 秒检测系统外观；变化时切换 THEME 并刷新全部窗口。自我调度。"""
+    state = {"current": system_theme()}
+
+    def tick():
+        global THEME
+        try:
+            now = system_theme()
+            if now != state["current"]:
+                old, new = THEME, PALETTES[now]
+                THEME = new
+                state["current"] = now
+                for w in get_roots():
+                    try:
+                        if w.winfo_exists():
+                            _theme_recolor(w, old, new)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        root.after(2000, tick)
+
+    root.after(2000, tick)
+
+
 def run_gui():
     import tkinter as tk
     from tkinter import ttk, messagebox
@@ -206,7 +314,7 @@ def run_gui():
     root.title("")  # 标题栏不显示文字（对齐原生应用如日历/备忘录的隐藏标题做法）
     root.geometry("900x860")
     root.minsize(800, 720)
-    root.configure(bg="#f5f6f8")
+    root.configure(bg=THEME["BG"])  # 常量在下方才定义，此处直接读模块级 THEME
 
     # 官方页面：GitHub 仓库子目录（作者信息、使用说明与发布的入口）
     official_url = "https://github.com/nannanpa/macos-apps/releases/latest"
@@ -281,7 +389,7 @@ def run_gui():
             win.geometry(f"+{max(0, px + 80)}+{max(0, py + 120)}")
         except Exception:
             pass
-        win.configure(bg="#f5f6f8")
+        win.configure(bg=BG)
         win.config(menu=parent.nametowidget(parent.cget("menu")))  # 沿用主菜单，避免英文菜单闪现
 
         def close():
@@ -289,20 +397,20 @@ def run_gui():
                 parent._date_ref = None
             win.destroy()
 
-        head = tk.Frame(win, bg="#f5f6f8")
+        head = tk.Frame(win, bg=BG)
         head.pack(fill="x", padx=10, pady=(10, 4))
-        lbl = tk.Label(head, text="", font=("PingFang SC", 13, "bold"), bg="#f5f6f8", width=14)
+        lbl = tk.Label(head, text="", font=("PingFang SC", 13, "bold"), bg=BG, width=14)
         lbl.pack(side="left", expand=True)
         tk.Button(head, text="‹", font=("PingFang SC", 14), width=2, relief="flat",
                   command=lambda: shift(-1)).pack(side="left")
         tk.Button(head, text="›", font=("PingFang SC", 14), width=2, relief="flat",
                   command=lambda: shift(1)).pack(side="left")
 
-        grid = tk.Frame(win, bg="#f5f6f8")
+        grid = tk.Frame(win, bg=BG)
         grid.pack(padx=10, pady=4)
         for i, w in enumerate(("一", "二", "三", "四", "五", "六", "日")):
-            tk.Label(grid, text=w, font=("PingFang SC", 11), bg="#f5f6f8",
-                     fg="#6b7280", width=4).grid(row=0, column=i)
+            tk.Label(grid, text=w, font=("PingFang SC", 11), bg=BG,
+                     fg=MUTED, width=4).grid(row=0, column=i)
 
         def render():
             if not win.winfo_exists():
@@ -325,7 +433,7 @@ def run_gui():
                 is_today = (d == dt.date.today())
                 tk.Button(grid, text=str(day), width=4,
                           font=("PingFang SC", 11, "bold" if is_today else "normal"),
-                          fg="#2563eb" if is_today else "#1f2937", relief="flat",
+                          fg=BLUE if is_today else INK, relief="flat",
                           command=lambda dd=d: (on_pick(dd.strftime("%Y-%m-%d")), close())
                           ).grid(row=r, column=c, padx=1, pady=1)
 
@@ -339,7 +447,7 @@ def run_gui():
             state["y"], state["m"] = y, m
             render()
 
-        foot = tk.Frame(win, bg="#f5f6f8")
+        foot = tk.Frame(win, bg=BG)
         foot.pack(fill="x", padx=10, pady=(4, 10))
         tk.Button(foot, text="今天", font=("PingFang SC", 11), relief="flat",
                   command=lambda: (on_pick(dt.date.today().strftime("%Y-%m-%d")), close())
@@ -401,8 +509,8 @@ def run_gui():
             if d:
                 ent_anchor.insert(0, d)
 
-        tk.Button(anchf, text="日历选择", font=FONT_SM, relief="flat", fg="#2563eb",
-                  activeforeground="#1d4ed8", bg=BG, activebackground="#eef2f7", bd=0,
+        tk.Button(anchf, text="日历选择", font=FONT_SM, relief="flat", fg=BLUE,
+                  activeforeground=BLUE_DARK, bg=BG, activebackground=SOFT, bd=0,
                   command=lambda: _pick_date(win, ent_anchor.get().strip(), _on_date_pick)
                   ).pack(side="left", padx=2)
 
@@ -472,8 +580,8 @@ def run_gui():
                 ent = ttk.Entry(inner, textvariable=v, width=COL_W[col], justify="center")
                 ent.grid(row=r + FIRST_ROW, column=col, sticky="ew", padx=3, pady=2)
                 ws.append(ent)
-            btn_del = tk.Button(inner, text="删", font=FONT_SM, relief="flat", fg="#dc2626",
-                                bg=CARD, activebackground="#eef2f7", bd=0,
+            btn_del = tk.Button(inner, text="删", font=FONT_SM, relief="flat", fg=DANGER,
+                                bg=CARD, activebackground=SOFT, bd=0,
                                 command=lambda: del_row(r))
             btn_del.grid(row=r + FIRST_ROW, column=3, sticky="w", padx=3)
             ws.append(btn_del)
@@ -549,15 +657,19 @@ def run_gui():
     # 作息对照菜单已于菜单栏创建时注册（必须先于帮助，详见上方 menubar 处）。
     # 切勿用 insert_cascade(0)：索引0是 macOS 应用菜单位，占用会让菜单变英文默认项。
 
-    # 视觉：贴近本机网页工作台的浅色卡片风格（浅灰底 / 白卡 / 细边框 / 蓝色主按钮）
-    style = ttk.Style()
-    style.configure(".", font=("PingFang SC", 13), background="#f5f6f8", foreground="#1f2937")
-    style.configure("TEntry", fieldbackground="#ffffff")
-    style.configure("TCombobox", fieldbackground="#ffffff")
-
-    INK, MUTED, BLUE = "#1f2937", "#6b7280", "#2563eb"
-    BG, CARD, LINE = "#f5f6f8", "#ffffff", "#e3e6ea"
+    # 视觉：主题色集中在 THEME（启动按系统外观选浅/深），自绘部分显式设色，
+    # ttk 原生控件（Entry/Combobox/Scrollbar）交给系统默认主题，深色下自动黑底白字。
+    # 局部色名引用 THEME；系统外观切换时 refresh_theme 更新主题后由各控件回调重绘。
+    BG, CARD, LINE = THEME["BG"], THEME["CARD"], THEME["LINE"]
+    INK, MUTED, BLUE = THEME["INK"], THEME["MUTED"], THEME["BLUE"]
+    BLUE_DARK, SOFT, SOFT2 = THEME["BLUE_DARK"], THEME["SOFT"], THEME["SOFT2"]
+    DIS_FG, DANGER, SEL_BG = THEME["DIS_FG"], THEME["DANGER"], THEME["SEL_BG"]
     FONT, FONT_SM = ("PingFang SC", 13), ("PingFang SC", 11)
+    style = ttk.Style()
+    # 只设字体，不设 background/fieldbackground/foreground——
+    # macOS aqua 主题原生跟随系统深浅（深色下 Entry/Combobox 自动黑底白字），
+    # 手工设色正是"深字压深底看不清"的根源。
+    style.configure(".", font=("PingFang SC", 13))
 
     def make_card(parent, title, subtitle=""):
         outer = tk.Frame(parent, bg=CARD, highlightbackground=LINE, highlightthickness=1, bd=0)
@@ -588,9 +700,9 @@ def run_gui():
             # 配色保持现有对比度；边框统一用浅色 LINE，与输入框/卡片一致
             self._fill = BLUE if self._primary else CARD
             self._fg = "white" if self._primary else INK
-            self._hover_fill = "#1d4ed8" if self._primary else "#eef2f7"
+            self._hover_fill = BLUE_DARK if self._primary else SOFT
             self._hover_fg = "white" if self._primary else BLUE
-            self._dis_fill, self._dis_fg = "#eef0f3", "#9aa3af"
+            self._dis_fill, self._dis_fg = SOFT2, DIS_FG
             self._outline = LINE
             self._hover = False
             f = tkfont.Font(font=FONT)
@@ -744,7 +856,7 @@ def run_gui():
     prev_wrap = tk.Frame(frm_preview, bg=CARD)
     prev_wrap.pack(fill="x", padx=16, pady=(0, 10))
     txt_preview = tk.Text(prev_wrap, height=4, wrap="word", font=("PingFang SC", 12),
-                          bg="#ffffff", fg=INK, relief="flat", highlightbackground=LINE,
+                          bg=CARD, fg=INK, relief="flat", highlightbackground=LINE,
                           highlightthickness=1, padx=10, pady=8)
     txt_preview.pack(side="left", fill="both", expand=True)
     prev_sb = ttk.Scrollbar(prev_wrap, orient="vertical", command=txt_preview.yview)
@@ -942,7 +1054,7 @@ def run_gui():
             wd_vars[name] = v
             tk.Checkbutton(row2, text=name[1:], variable=v, font=FONT_SM,
                            bg=CARD, fg=INK, activebackground=CARD,
-                           selectcolor="#ffffff").pack(side="left")
+                           selectcolor=CARD).pack(side="left")
 
         def sync_wd(*_):
             for w in row2.winfo_children():
@@ -959,7 +1071,7 @@ def run_gui():
         for text, val in (("永不", "forever"), ("共", "count"), ("直到", "until")):
             tk.Radiobutton(row3, text=text, value=val, variable=var_end,
                            font=FONT_SM, bg=CARD, fg=INK, activebackground=CARD,
-                           selectcolor="#ffffff").pack(side="left")
+                           selectcolor=CARD).pack(side="left")
         ent_count = tk.Entry(row3, width=4, font=FONT, justify="center")
         ent_count.insert(0, str(prev_spec.get("count") or 10))
         ent_count.pack(side="left", padx=2)
@@ -1240,7 +1352,7 @@ def run_gui():
         # 否则 expand=True 会吃光垂直空间，把底部按钮挤成一条线
         lst = tk.Listbox(list_card, height=14, font=FONT_SM, bg=CARD, fg=INK,
                          relief="flat", highlightthickness=0, bd=0,
-                         selectbackground="#dbeafe", selectforeground=INK,
+                         selectbackground=SEL_BG, selectforeground=INK,
                          activestyle="none")
         lst.pack(side="left", fill="both", expand=True, padx=(8, 0), pady=8)
         sb = ttk.Scrollbar(list_card, orient="vertical", command=lst.yview)
@@ -1350,7 +1462,7 @@ def run_gui():
     btn(frm_add, "日程管理", on_manage).pack(side="left")
 
     # 状态提示条：浅色卡片，紧跟按钮行
-    tk.Label(body, textvariable=status_var, font=FONT_SM, bg="#eef2f7", fg=MUTED,
+    tk.Label(body, textvariable=status_var, font=FONT_SM, bg=SOFT, fg=MUTED,
              anchor="w", justify="left", padx=12, pady=7).pack(fill="x", pady=(10, 0))
 
     # A6 验收路径：新增/删除日历分类后点「刷新日历分类」即重读
@@ -1374,6 +1486,19 @@ def run_gui():
     root.update_idletasks()
     _fit_canvas()
     root.minsize(800, min(620, want_h))
+
+    # 主题跟随：系统切换浅/深色时刷新主窗与所有弹出窗口，无需重启、不丢输入
+    def _all_roots():
+        found = [root]
+        # 递归收集所有层级的 Toplevel（日期弹窗可能挂在作息表下，非 root 直接子）
+        def collect(w):
+            for c in w.winfo_children():
+                if isinstance(c, tk.Toplevel):
+                    found.append(c)
+                collect(c)
+        collect(root)
+        return found
+    _theme_watch(root, _all_roots)
 
     root.mainloop()
 
