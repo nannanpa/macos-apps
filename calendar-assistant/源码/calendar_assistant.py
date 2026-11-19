@@ -247,8 +247,8 @@ def run_gui():
     # 自定义 Help 菜单（name="help" 成为系统帮助菜单）。注意 macOS 会在帮助菜单顶部
     # 固定放一个「行程助手帮助」项：不接管时点击它弹「Help isn't available」（无 Help Book），
     # 必须注册 tk::mac::ShowHelp 回调把这一项接到本地帮助页上。
+    # 本地帮助页就由这个系统项承担，不再重复加「使用说明（本机）」——两者本就是同一页。
     help_menu = tk.Menu(menubar, name="help", tearoff=0)
-    help_menu.add_command(label="使用说明（本机）", command=open_help)
     help_menu.add_command(label="使用说明（在线）",
                           command=lambda: webbrowser.open(readme_url))
     help_menu.add_command(label="官方页面（发布与下载）",
@@ -1209,24 +1209,58 @@ def run_gui():
     def on_manage():
         win = tk.Toplevel(root)
         win.title("日程管理")
-        win.geometry("680x420")
         win.transient(root)  # 从属主窗口：不单占 Dock 项，且不会被压到主窗口后面
-        ttk.Label(win, text="打开即列出经本 App 填报的日程；也可按标题精确查找：").pack(
-            anchor="w", padx=8, pady=(8, 2))
-        row = ttk.Frame(win)
-        row.pack(fill="x", padx=8)
-        ent_q = ttk.Entry(row, width=40)
-        ent_q.pack(side="left")
-        lst = tk.Listbox(win, height=14)
-        lst.pack(fill="both", expand=True, padx=8, pady=6)
+        win.configure(bg=BG)
+        # 对话框也挂主菜单：否则它拿到焦点时 macOS 显示默认英文菜单，看起来像「菜单变了」
+        win.config(menu=menubar)
+        # 显式居中于主窗口，避免 macOS 记住坏坐标把窗口摆到屏幕外
+        wx = root.winfo_x() + (root.winfo_width() - 720) // 2
+        wy = root.winfo_y() + 60
+        win.geometry(f"720x460+{max(0, wx)}+{max(0, wy)}")
+        win.lift()
+
+        # 顶部提示
+        tk.Label(win, text="打开即列出经本 App 填报的日程；也可按标题精确查找：",
+                 font=FONT_SM, bg=BG, fg=MUTED, anchor="w").pack(
+            fill="x", padx=16, pady=(14, 6))
+
+        # 搜索行（卡片内）：输入框 + 查找按钮
+        row_card = tk.Frame(win, bg=CARD, highlightbackground=LINE, highlightthickness=1, bd=0)
+        row_card.pack(fill="x", padx=16, pady=(0, 8))
+        row = tk.Frame(row_card, bg=CARD)
+        row.pack(fill="x", padx=10, pady=8)
+        ent_q = ttk.Entry(row, width=40, font=FONT)
+        ent_q.pack(side="left", padx=(0, 8))
+        # 命令在下方定义，用 lambda 延迟引用（与作息表菜单同一做法）
+        FlatButton(row, "查找", lambda: do_find(), kind="primary").pack(side="left")
+
+        # 列表卡片：浅边框白底、统一字体、滚动条按需显示
+        list_card = tk.Frame(win, bg=CARD, highlightbackground=LINE, highlightthickness=1, bd=0)
+        list_card.pack(fill="both", expand=True, padx=16, pady=(0, 8))
+        lst = tk.Listbox(list_card, height=14, font=FONT_SM, bg=CARD, fg=INK,
+                         relief="flat", highlightthickness=0, bd=0,
+                         selectbackground="#dbeafe", selectforeground=INK,
+                         activestyle="none")
+        lst.pack(side="left", fill="both", expand=True, padx=(8, 0), pady=8)
+        sb = ttk.Scrollbar(list_card, orient="vertical", command=lst.yview)
+
         found: list[dict] = []
         var_src = tk.StringVar(value="")
+
+        def _sync_sb():
+            # 列表项超出可视区才显示滚动条，条目少时保持干净
+            if lst.size() > 0 and lst.yview()[1] < 0.999:
+                sb.pack(side="right", fill="y", pady=8, padx=(0, 8))
+            else:
+                sb.pack_forget()
+        lst.bind("<Configure>", lambda e: _sync_sb())
 
         def render():
             lst.delete(0, "end")
             for i, ev in enumerate(found):
                 lst.insert("end", f"{_fmt_dt(ev['start'])} ~ {_fmt_dt(ev['end'])}  [{ev['calendar']}]  {ev['title']}"
                            + (f"（{ev['recur']}）" if ev.get("recur") else ""))
+            _sync_sb()
 
         def load_mine():
             nonlocal found
@@ -1263,8 +1297,6 @@ def run_gui():
             var_src.set(f"按标题找到 {len(found)} 条")
             win.lift()
 
-        ttk.Button(row, text="查找", command=do_find).pack(side="left", padx=4)
-
         def do_del():
             sel = lst.curselection()
             if not sel:
@@ -1286,11 +1318,13 @@ def run_gui():
             _ledger_remove(ev["identifier"])  # 经本工具删除的条目同步出台账
             load_mine()
 
-        frm_m = tk.Frame(win)
-        frm_m.pack(pady=4)
-        ttk.Button(frm_m, text="删除选中日程", command=do_del).pack(side="left", padx=4)
-        ttk.Button(frm_m, text="重新读取", command=load_mine).pack(side="left", padx=4)
-        ttk.Label(win, textvariable=var_src).pack(anchor="w", padx=8, pady=(0, 6))
+        # 底部操作按钮（FlatButton 与主界面一致）+ 状态条
+        frm_m = tk.Frame(win, bg=BG)
+        frm_m.pack(pady=(0, 6))
+        FlatButton(frm_m, "删除选中日程", do_del, kind="ghost").pack(side="left", padx=5)
+        FlatButton(frm_m, "重新读取", load_mine, kind="ghost").pack(side="left", padx=5)
+        tk.Label(win, textvariable=var_src, font=FONT_SM, bg=BG, fg=MUTED,
+                 anchor="w").pack(fill="x", padx=16, pady=(0, 12))
 
         load_mine()
 
