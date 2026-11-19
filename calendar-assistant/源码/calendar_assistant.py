@@ -222,13 +222,18 @@ def run_gui():
                 continue
             p = os.path.join(base, "帮助.html")
             if os.path.exists(p):
-                return p
+                # PyInstaller 的 _MEIPASS 在 Frameworks 下放的是指向 Resources 的符号链接；
+                # realpath 解析成真实文件，避免 open 命令对符号链接的行为不确定
+                return os.path.realpath(p)
         return None
 
     def open_help():
+        import urllib.parse
         p = _help_html_path()
         if p:
-            webbrowser.open("file://" + p)
+            # file:// URL 必须对路径做百分号编码，否则中文路径会被 macOS 的 open
+            # 当成无法解析的 URL，回退成「在 Finder 中显示该文件」（实测跳 Frameworks 目录）
+            webbrowser.open("file://" + urllib.parse.quote(p))
         else:  # 兜底：包内没带帮助页时打开在线版
             webbrowser.open(readme_url)
 
