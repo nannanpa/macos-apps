@@ -1236,7 +1236,8 @@ def run_gui():
 
         # 列表卡片：浅边框白底、统一字体、滚动条按需显示
         list_card = tk.Frame(win, bg=CARD, highlightbackground=LINE, highlightthickness=1, bd=0)
-        list_card.pack(fill="both", expand=True, padx=16, pady=(0, 8))
+        # 注意：列表最后 pack（见函数末尾），让底部按钮/状态条先占住固定高度，
+        # 否则 expand=True 会吃光垂直空间，把底部按钮挤成一条线
         lst = tk.Listbox(list_card, height=14, font=FONT_SM, bg=CARD, fg=INK,
                          relief="flat", highlightthickness=0, bd=0,
                          selectbackground="#dbeafe", selectforeground=INK,
@@ -1320,11 +1321,14 @@ def run_gui():
 
         # 底部操作按钮（FlatButton 与主界面一致）+ 状态条
         frm_m = tk.Frame(win, bg=BG)
-        frm_m.pack(pady=(0, 6))
+        # 不 fill x：容器宽度=按钮内容宽度，pack 默认居中，保持原设计的居中按钮行
+        frm_m.pack(side="bottom", pady=(0, 6))
         FlatButton(frm_m, "删除选中日程", do_del, kind="ghost").pack(side="left", padx=5)
         FlatButton(frm_m, "重新读取", load_mine, kind="ghost").pack(side="left", padx=5)
         tk.Label(win, textvariable=var_src, font=FONT_SM, bg=BG, fg=MUTED,
-                 anchor="w").pack(fill="x", padx=16, pady=(0, 12))
+                 anchor="w").pack(side="bottom", fill="x", padx=16, pady=(0, 12))
+        # 列表最后 pack：按钮/状态条已贴底占位，expand 只会填满中间剩余空间
+        list_card.pack(fill="both", expand=True, padx=16, pady=(0, 8))
 
         load_mine()
 
