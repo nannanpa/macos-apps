@@ -26,6 +26,7 @@ class Parsed:
     calendar_score: int = 0
     has_date: bool = False   # 输入里是否显式含日期（多事件时第二条继承日期用）
     recur: str = ""          # 重复提示：daily/weekly/monthly/yearly（空=不重复），供界面预选
+    recur_custom: dict | None = None  # 自定义重复提示（如单双周/共N次），格式同界面 spec，优先于 recur
     warnings: list[str] = field(default_factory=list)
 
     @property
@@ -72,6 +73,77 @@ _RE_DATETIME = re.compile(
 _RE_RANGE_SEP = re.compile(r"\s*(?:到|至|~|～|—|–|--|-|－)\s*")
 _RE_DURATION = re.compile(r"(\d{1,3})\s*(?:个)?\s*(?:小时|钟头|h|H)")
 _RE_ALLDAY = re.compile(r"全天|一整天|整天")
+
+# ---------------- 周期性课程（节次/单双周/次数） ----------------
+# 节次：「第3节」「第3-4节」「3-4节」（中文数字先归一成阿拉伯数字）。
+# 裸单数字不带「第」且无区间不认（防「连上3节课」被当时刻）。
+# 查不到作息表时不改写、给警告，绝不静默猜。
+_RE_SLOT = re.compile(r"第?\s*(\d{1,2})\s*(?:[-~到至]\s*第?\s*(\d{1,2}))?\s*节")
+_RE_DANSHUANG = re.compile(r"(单|双)周\s*(?=(?:每)?(?:周|礼拜|星期)[一二三四五六日天])")
+_RE_COUNT = re.compile(r"(?:共|上)\s*(\d{1,3})\s*次(?:课)?")
+_WEEKDAY_NAME = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
+
+
+def _slot_num(tok: str) -> int | None:
+    if tok.isdigit():
+        return int(tok)
+    return _cn_num_to_int(tok)
+
+
+def _slot_norm(s: str, slots: dict[int, tuple[str, str]]) -> tuple[str, list[str]]:
+    """节次表述 → 具体时刻区间（「第3-4节」→「14:00到15:40」），供后续链路按普通时刻解析。
+    slots：{节次号: (开始"HH:MM", 结束"HH:MM")}。查不到的节次不改写、给警告。"""
+    warns: list[str] = []
+
+    def rep(m: re.Match) -> str:
+        n1 = int(m.group(1))
+        n2 = int(m.group(2)) if m.group(2) else None
+        # 裸「3节」（无第、无区间）不认，防「连上3节课」之类误伤
+        if not m.group(0).startswith("第") and n2 is None:
+            return m.group(0)
+        t1 = slots.get(n1)
+        if not t1:
+            warns.append(f"第{n1}节未在作息对照表中配置时刻，本次未换算（设置→作息对照表）")
+            return m.group(0)
+        if n2 is not None:
+            t2 = slots.get(n2)
+            if not t2:
+                warns.append(f"第{n2}节未在作息对照表中配置时刻，本次未换算（设置→作息对照表）")
+                return m.group(0)
+            return f"{t1[0]}到{t2[1]}"
+        return f"{t1[0]}到{t1[1]}"
+
+    return _RE_SLOT.sub(rep, s), warns
+
+
+def _norm_cn_slots(s: str) -> str:
+    """「第三节」→「第3节」（仅限带「第」的节次，其他中文数字不碰）。"""
+    def rep(m: re.Match) -> str:
+        n = _cn_num_to_int(m.group(1))
+        return f"第{n}节" if n is not None else m.group(0)
+    return re.sub(r"第\s*([零一二两三四五六七八九十]{1,2})\s*节", rep, s)
+
+
+def _parity_of(d: dt.date, term_anchor: dt.date) -> int:
+    """相对学期第 1 周（周一）的周序奇偶：0=单周（第1、3、5…周），1=双周。"""
+    wk0 = term_anchor - dt.timedelta(days=term_anchor.weekday())
+    return ((d - wk0).days // 7) % 2
+
+
+def recur_hint_label(spec: dict) -> str:
+    """自定义重复 spec → 中文摘要（与界面自定义对话框的 label 同构）。"""
+    unit = {"daily": "天", "weekly": "周", "monthly": "月", "yearly": "年"}.get(
+        spec.get("freq") or "weekly", "周")
+    n = spec.get("interval") or 1
+    label = ("每" + unit) if n == 1 else f"每{n}{unit}"
+    if spec.get("weekdays"):
+        label += "（" + "、".join(spec["weekdays"]) + "）"
+    if spec.get("count"):
+        label += f"·共{spec['count']}次"
+    if spec.get("until"):
+        u = spec["until"]
+        label += f"·至{u.strftime('%Y-%m-%d') if hasattr(u, 'strftime') else u}"
+    return label
 
 # 中文数字时刻归一：「下午二点半」→「下午2点半」。只对「X点(半|X分|X)」结构生效，
 # 不碰「五中全会」「三楼会议室」这类不含「点」的数字词。
@@ -257,10 +329,13 @@ def _find_datetimes(text: str):
     return out
 
 
-def parse(text: str, now: dt.datetime | None = None) -> Parsed:
+def parse(text: str, now: dt.datetime | None = None,
+          slots: dict[int, tuple[str, str]] | None = None,
+          term_anchor: dt.date | None = None) -> Parsed:
     p = Parsed(raw=text)
     now = now or dt.datetime.now()
     base = now.date()
+    slots = slots or {}
     s = text.strip()
     # 先剥离星期/相对日括注（如「（周五，明天）」），防止括注内词被误当天时间片段
     s = re.sub(r"[（(][^（）()]*(?:周[一二三四五六日天]|星期|礼拜|今天|明天|后天)[^（）()]*[）)]", "", s)
@@ -297,6 +372,29 @@ def parse(text: str, now: dt.datetime | None = None) -> Parsed:
     # 仅当后面紧跟「月…日」完整日期时才替换，避免「明年3月的计划」被改成「2027年3月的计划」
     s = re.sub(r"明年\s*(?=\d{1,2}\s*月\s*\d{1,2}\s*[日号])", f"{base.year + 1}年", s)
     s = re.sub(r"今年\s*(?=\d{1,2}\s*月\s*\d{1,2}\s*[日号])", f"{base.year}年", s)
+    # 节次换算（周期性课程）：「第3-4节」→「14:00到15:40」，走普通时刻链路。
+    # 作息表未配置时只警告不改写（宁可不起时间也不猜）。
+    s = _norm_cn_slots(s)
+    if _RE_SLOT.search(s):
+        if slots:
+            s, slot_warns = _slot_norm(s, slots)
+            for w in slot_warns:
+                if w not in p.warnings:
+                    p.warnings.append(w)
+        else:
+            p.warnings.append("检测到节次表述（如第3-4节），请先到 设置→作息对照表 配置各节时刻")
+    # 单双周：「单周/双周周X」——移除标记保留周X供日期解析，起始日稍后按奇偶锚定
+    parity: int | None = None
+    mdsw = _RE_DANSHUANG.search(s)
+    if mdsw:
+        parity = 0 if mdsw.group(1) == "单" else 1
+        s = s[: mdsw.start()] + s[mdsw.end():]
+    # 次数结束：「每周六10:00-11:30，共20次」→ 自定义重复带 count
+    count_n: int | None = None
+    mcnt = _RE_COUNT.search(s)
+    if mcnt:
+        count_n = int(mcnt.group(1))
+        s = s[: mcnt.start()] + s[mcnt.end():]
     # 重复提示（循环表述）：「每周三例会」「每天晨会」——开始时间取首个出现日，
     # 是否真按重复写入由用户在「重复」下拉里确认，解析只做预选不做决断。
     # 「每周三」由日期片段整体消费；这里只消费不带动日期的「每天/每月/每年/每周」，
@@ -460,7 +558,21 @@ def parse(text: str, now: dt.datetime | None = None) -> Parsed:
             take(*span)
         i += 1
 
-    # 3) 时长（如「24小时值班」）
+    # 3) 单双周锚定：把起始日挪到奇偶正确的那个周X（只向后挪，不回退到过去）
+    if parity is not None and start_dt is not None:
+        if term_anchor:
+            if _parity_of(start_dt.date(), term_anchor) != parity:
+                delta = dt.timedelta(days=7)
+                start_dt = start_dt + delta
+                if end_dt is not None:
+                    end_dt = end_dt + delta
+                p.warnings.append(
+                    f"起始日已按{'单' if parity == 0 else '双'}周锚定到 {start_dt:%m月%d日}，请确认"
+                )
+        else:
+            p.warnings.append("未设置学期第一周（设置→作息对照表），单/双周以最近一周为准，请确认")
+
+    # 3.5) 时长（如「24小时值班」）
     mdur = _RE_DURATION.search(s)
     if mdur:
         hours = int(mdur.group(1))
@@ -510,6 +622,15 @@ def parse(text: str, now: dt.datetime | None = None) -> Parsed:
         p.warnings.append("结束时间早于开始时间，请检查")
     if p.start is not None and p.start < now:
         p.warnings.append("行程时间在过去，请确认")
+    # 自定义重复提示：单双周（每2周）与次数结束（共N次）。有其一即走自定义通道
+    if parity is not None or count_n:
+        spec: dict = {"freq": p.recur or "weekly", "interval": 2 if parity is not None else 1}
+        if start_dt is not None:
+            spec["weekdays"] = [_WEEKDAY_NAME[start_dt.weekday()]]
+        if count_n:
+            spec["count"] = count_n
+        p.recur = ""
+        p.recur_custom = spec
     return p
 
 
@@ -524,7 +645,9 @@ def format_parsed(p: Parsed) -> str:
         lines.append(f"地点：{p.location}")
     if p.notes:
         lines.append(f"备注：{p.notes}")
-    if p.recur:
+    if p.recur_custom:
+        lines.append(f"重复：{recur_hint_label(p.recur_custom)}（解析提示，可在表单改）")
+    elif p.recur:
         label = {"daily": "每天", "weekly": "每周", "monthly": "每月", "yearly": "每年"}.get(p.recur, p.recur)
         lines.append(f"重复：{label}（解析提示，可在表单改）")
     if p.calendar_hint:
@@ -608,11 +731,60 @@ def refine_title(title: str) -> tuple[str, str]:
     return meet, "，".join(notes)
 
 
-def parse_multi(text: str, now: dt.datetime | None = None) -> list[Parsed]:
+# 课程表行展开：一门课、多个上课时段（「周一第3-4节、周三第3-4节」或「周六10:00-11:30、周日9:00-10:00」）
+_RE_COURSE_OCC = re.compile(
+    r"(?:(单|双)周)?(?:每)?(?:周|礼拜|星期)[一二三四五六日天]\s*"
+    r"(?:第?\s*\d{1,2}\s*(?:[-~到至]\s*第?\s*\d{1,2})?\s*节"
+    r"|\d{1,2}\s*[:：]\s*\d{2}(?:\s*[-~到至]\s*\d{1,2}\s*[:：]\s*\d{2})?)"
+)
+
+
+def _expand_course_line(seg: str) -> list[str] | None:
+    """课程表行 → 多条子输入（每个上课时段一条，共享标题/地点）。
+
+    形态：`高等数学 周一第3-4节、周三第3-4节 主楼302`。
+    判定：≥2 个时段片段、且片段之间只有分隔符（、，,和与/空白）。不满足返回 None 走普通解析。
+    行尾短词块含教室/场地特征字（或数字）且无时刻词时识别为地点，带警告供确认——
+    这是课程表行内的启发式，其余文本不受影响。
+    """
+    ms = list(_RE_COURSE_OCC.finditer(seg))
+    if len(ms) < 2:
+        return None
+    for a, b in zip(ms, ms[1:]):
+        if not re.fullmatch(r"[、，,和与\s]*", seg[a.end(): b.start()]):
+            return None
+    head = seg[: ms[0].start()].strip()
+    tail = seg[ms[-1].end():].strip()
+    loc_token = None
+    tail_rest = tail
+    if tail and not re.search(r"在|地点[:：]|地址[:：]", tail):
+        mt = re.search(r"(\S+)$", tail)
+        if mt:
+            tok = mt.group(1)
+            if (len(tok) <= 20
+                    and not re.search(r"\d{1,2}[:：]|点|周[一二三四五六日天]|节|次", tok)
+                    and re.search(r"\d|教室|楼|厅|室|馆|场|房|中心|操场|园", tok)):
+                loc_token = tok
+                tail_rest = tail[: mt.start()].strip()
+    out = []
+    for m in ms:
+        occ = m.group(0).strip()
+        parts = [x for x in (head, occ, tail_rest) if x]
+        if loc_token:
+            parts.append("在" + loc_token)
+        out.append(" ".join(parts))
+    return out
+
+
+def parse_multi(text: str, now: dt.datetime | None = None,
+                slots: dict[int, tuple[str, str]] | None = None,
+                term_anchor: dt.date | None = None) -> list[Parsed]:
     """一条输入解析出多条行程。
 
     规则：
     - 按 。；;换行 分句，每句独立解析；
+    - 课程表行（一门课多个上课时段）：「高等数学 周一第3-4节、周三第3-4节 主楼302」
+      按时段展开成多条，标题/地点共享；
     - 后续句无显式日期但有时刻时，继承前一句的日期（「9:10-9:50进行……」）；
     - 全局「地点：X」标签作用于全部事件；各句内「在X」地点仍按句生效；
     - 无日期时间的残句并入上一条的标题，避免丢信息。
@@ -633,7 +805,22 @@ def parse_multi(text: str, now: dt.datetime | None = None) -> list[Parsed]:
     prev_date: dt.date | None = None
 
     for seg in [t.strip() for t in _SENT_SPLIT.split(s) if t.strip()]:
-        p = parse(seg, now)
+        # 课程行展开：一门课、多个「周X+节次/时刻」时段 → 多条共享标题/地点的事件
+        expanded = _expand_course_line(seg)
+        if expanded is not None:
+            for sub in expanded:
+                p = parse(sub, now, slots, term_anchor)
+                if p.start is None:
+                    continue
+                # 课程表行语义上就是每周上课：无重复提示时预选「每周」（界面可改）
+                if not p.recur and not p.recur_custom:
+                    p.recur = "weekly"
+                if p.start is not None:
+                    prev_date = p.start.date()
+                events.append(p)
+            if expanded:
+                continue  # 展开成功即本行处理完毕
+        p = parse(seg, now, slots, term_anchor)
         if p.start is None:
             if p.title and events:
                 # 纯文字残句：并入上一条标题

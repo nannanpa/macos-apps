@@ -14,17 +14,23 @@
 from __future__ import annotations
 
 import argparse
+import calendar
 import datetime as dt
 import json
 import os
+import re
 import sys
 
 from calkit import CalendarKit, CalendarError
-from fuzzy_parser import parse as fuzzy_parse, parse_multi as fuzzy_parse_multi, guess_calendar, format_parsed
+from fuzzy_parser import (parse as fuzzy_parse, parse_multi as fuzzy_parse_multi,
+                          guess_calendar, format_parsed, recur_hint_label)
 import geo_helper
 
 
 TEST_PREFIX = "WB验收-可删"
+
+# 作息对照表窗口单例引用（防止从菜单重复打开多个窗口）
+_periods_win = None
 
 
 # ==================== 写入台账（「日程管理→一键读取」的依据） ====================
@@ -62,6 +68,79 @@ def _ledger_add(ident: str, title: str) -> None:
 def _ledger_remove(ident: str) -> None:
     items = [x for x in _ledger_load() if x.get("id") != ident]
     _ledger_save(items)
+
+
+# ==================== 作息对照表（节次 ↔ 时刻，周期性课程解析用） ====================
+# 定位：为「按节次排课」的课程（学校/家长/跟班进修）把节次换算成时刻；
+# 直接写钟点的课（如培训兴趣班）无需本表。解析端只认配置过的节次，
+# 查不到不改写不猜（宁可回退手动填写）。
+
+def _periods_path() -> str:
+    d = os.path.expanduser("~/Library/Application Support/CalendarAssistant")
+    os.makedirs(d, exist_ok=True)
+    return os.path.join(d, "periods.json")
+
+
+def _periods_load() -> dict:
+    """返回 {"term_anchor": date|None, "periods": [{"name","start","end"}]}（文件缺失/损坏→全空）。"""
+    try:
+        with open(_periods_path(), encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            return {"term_anchor": None, "periods": []}
+    except Exception:
+        return {"term_anchor": None, "periods": []}
+    out = {"term_anchor": None, "periods": []}
+    ta = data.get("term_anchor")
+    if isinstance(ta, str) and ta:
+        try:
+            out["term_anchor"] = dt.datetime.strptime(ta, "%Y-%m-%d").date()
+        except ValueError:
+            pass
+    if isinstance(data.get("periods"), list):
+        out["periods"] = [x for x in data["periods"]
+                          if isinstance(x, dict) and x.get("name") and x.get("start")]
+    return out
+
+
+def _periods_save(conf: dict) -> None:
+    with open(_periods_path(), "w", encoding="utf-8") as f:
+        json.dump(conf, f, ensure_ascii=False, indent=1)
+
+
+def _periods_conf() -> tuple[dict[int, tuple[str, str]], dt.date | None]:
+    """解析用视图：({节次号: (开始,结束)}, 学期第一周一)。节次号取名称里的数字。"""
+    conf = _periods_load()
+    slots: dict[int, tuple[str, str]] = {}
+    for x in conf["periods"]:
+        m = re.search(r"\d{1,2}", str(x.get("name", "")))
+        if not m:
+            continue
+        n = int(m.group())
+        try:
+            dt.datetime.strptime(str(x["start"]), "%H:%M")
+            dt.datetime.strptime(str(x["end"]), "%H:%M")
+        except (ValueError, KeyError):
+            continue
+        slots.setdefault(n, (str(x["start"]), str(x["end"])))
+    return slots, conf["term_anchor"]
+
+
+_PERIOD_TPL_COLLEGE = [
+    ("第1节", "08:00", "08:45"), ("第2节", "08:55", "09:40"),
+    ("第3节", "10:00", "10:45"), ("第4节", "10:55", "11:40"),
+    ("第5节", "13:30", "14:15"), ("第6节", "14:25", "15:10"),
+    ("第7节", "15:20", "16:05"), ("第8节", "16:15", "17:00"),
+    ("第9节", "18:00", "18:45"), ("第10节", "18:55", "19:40"),
+]
+_PERIOD_TPL_SCHOOL = [
+    ("第1节", "08:00", "08:40"), ("第2节", "08:50", "09:30"),
+    ("第3节", "09:50", "10:30"), ("第4节", "10:40", "11:20"),
+    ("第5节", "11:30", "12:10"), ("第6节", "14:00", "14:40"),
+    ("第7节", "14:50", "15:30"), ("第8节", "15:40", "16:20"),
+    ("第9节", "16:30", "17:10"), ("第10节", "17:20", "18:00"),
+    ("第11节", "18:30", "19:10"), ("第12节", "19:20", "20:00"),
+]
 
 
 def _fmt_dt(d: dt.datetime | None) -> str:
@@ -153,10 +232,16 @@ def run_gui():
         else:  # 兜底：包内没带帮助页时打开在线版
             webbrowser.open(readme_url)
 
+    # 菜单栏顺序 = 注册顺序（本机实测 name="help" 并未固定到最右）：
+    # 先注册「作息对照」，再注册「帮助」，显示才是「作息对照 → 帮助」。
+    # 注意 open_periods_dialog 定义在下方，此处用 lambda 延迟引用避免 NameError。
+    menubar = tk.Menu(root)
+    setmenu = tk.Menu(menubar, tearoff=0)
+    setmenu.add_command(label="作息对照表…", command=lambda: open_periods_dialog())
+    menubar.add_cascade(label="作息对照", menu=setmenu)
     # 自定义 Help 菜单（name="help" 成为系统帮助菜单）。注意 macOS 会在帮助菜单顶部
     # 固定放一个「行程助手帮助」项：不接管时点击它弹「Help isn't available」（无 Help Book），
     # 必须注册 tk::mac::ShowHelp 回调把这一项接到本地帮助页上。
-    menubar = tk.Menu(root)
     help_menu = tk.Menu(menubar, name="help", tearoff=0)
     help_menu.add_command(label="使用说明（本机）", command=open_help)
     help_menu.add_command(label="使用说明（在线）",
@@ -166,6 +251,298 @@ def run_gui():
     menubar.add_cascade(label="帮助", menu=help_menu)
     root.config(menu=menubar)
     root.createcommand("tk::mac::ShowHelp", open_help)
+
+    def _pick_date(parent, initial: str, on_pick) -> None:
+        """轻量月历弹窗：点日期→回调 on_pick('YYYY-MM-DD')。用标准库 calendar，无新依赖、单例。"""
+        if getattr(parent, "_date_ref", None) is not None and parent._date_ref.winfo_exists():
+            parent._date_ref.lift()
+            parent._date_ref.focus_force()
+            return
+        base = dt.date.today()
+        if initial:
+            try:
+                base = dt.datetime.strptime(initial, "%Y-%m-%d").date()
+            except ValueError:
+                pass
+        state = {"y": base.year, "m": base.month}
+        win = tk.Toplevel(parent)
+        parent._date_ref = win
+        win.title("选择日期")
+        win.transient(parent)
+        win.resizable(False, False)
+        # 居中于父窗口，避免落在屏幕外
+        try:
+            px, py = parent.winfo_x(), parent.winfo_y()
+            win.geometry(f"+{max(0, px + 80)}+{max(0, py + 120)}")
+        except Exception:
+            pass
+        win.configure(bg="#f5f6f8")
+        win.config(menu=parent.nametowidget(parent.cget("menu")))  # 沿用主菜单，避免英文菜单闪现
+
+        def close():
+            if getattr(parent, "_date_ref", None) is win:
+                parent._date_ref = None
+            win.destroy()
+
+        head = tk.Frame(win, bg="#f5f6f8")
+        head.pack(fill="x", padx=10, pady=(10, 4))
+        lbl = tk.Label(head, text="", font=("PingFang SC", 13, "bold"), bg="#f5f6f8", width=14)
+        lbl.pack(side="left", expand=True)
+        tk.Button(head, text="‹", font=("PingFang SC", 14), width=2, relief="flat",
+                  command=lambda: shift(-1)).pack(side="left")
+        tk.Button(head, text="›", font=("PingFang SC", 14), width=2, relief="flat",
+                  command=lambda: shift(1)).pack(side="left")
+
+        grid = tk.Frame(win, bg="#f5f6f8")
+        grid.pack(padx=10, pady=4)
+        for i, w in enumerate(("一", "二", "三", "四", "五", "六", "日")):
+            tk.Label(grid, text=w, font=("PingFang SC", 11), bg="#f5f6f8",
+                     fg="#6b7280", width=4).grid(row=0, column=i)
+
+        def render():
+            if not win.winfo_exists():
+                return
+            y, m = state["y"], state["m"]
+            lbl.config(text=f"{y}年{m}月")
+            for w in grid.grid_slaves():
+                if int(w.grid_info().get("row", 0)) >= 1:
+                    w.destroy()
+            ndays = calendar.monthrange(y, m)[1]
+            pos = calendar.monthcalendar(y, m)
+            for day in range(1, ndays + 1):
+                # 按 day 在月历中的位置定位（周一为首列）
+                r, c = None, None
+                for ri, wk in enumerate(pos, start=1):
+                    if day in wk:
+                        r, c = ri, wk.index(day)
+                        break
+                d = dt.date(y, m, day)
+                is_today = (d == dt.date.today())
+                tk.Button(grid, text=str(day), width=4,
+                          font=("PingFang SC", 11, "bold" if is_today else "normal"),
+                          fg="#2563eb" if is_today else "#1f2937", relief="flat",
+                          command=lambda dd=d: (on_pick(dd.strftime("%Y-%m-%d")), close())
+                          ).grid(row=r, column=c, padx=1, pady=1)
+
+        def shift(delta):
+            m = state["m"] + delta
+            y = state["y"]
+            if m < 1:
+                m, y = 12, y - 1
+            elif m > 12:
+                m, y = 1, y + 1
+            state["y"], state["m"] = y, m
+            render()
+
+        foot = tk.Frame(win, bg="#f5f6f8")
+        foot.pack(fill="x", padx=10, pady=(4, 10))
+        tk.Button(foot, text="今天", font=("PingFang SC", 11), relief="flat",
+                  command=lambda: (on_pick(dt.date.today().strftime("%Y-%m-%d")), close())
+                  ).pack(side="left", padx=4)
+        tk.Button(foot, text="清空", font=("PingFang SC", 11), relief="flat",
+                  command=lambda: (on_pick(""), close())).pack(side="left", padx=4)
+        tk.Button(foot, text="取消", font=("PingFang SC", 11), relief="flat",
+                  command=close).pack(side="right", padx=4)
+        win.protocol("WM_DELETE_WINDOW", close)
+        render()
+
+    # ---------- 作息对照表设置（节次 ↔ 时刻，周期性课程解析用） ----------
+    def open_periods_dialog():
+        # 单例：已打开则抬到前台，不再开第二个窗口
+        global _periods_win
+        if _periods_win is not None and _periods_win.winfo_exists():
+            _periods_win.lift()
+            _periods_win.focus_force()
+            return
+
+        conf = _periods_load()
+        win = tk.Toplevel(root)
+        _periods_win = win
+        win.title("作息对照表（节次 ↔ 时刻）")
+        # 固定高度：10/12节都能容纳，切换模板按钮不跳；超出靠输入区滚动。
+        # 显式居中于主窗口，避免 macOS 记住坏坐标把对话框摆到屏幕外。
+        wx = root.winfo_x() + (root.winfo_width() - 600) // 2
+        wy = root.winfo_y() + 60
+        win.geometry(f"600x580+{max(0, wx)}+{max(0, wy)}")
+        win.transient(root)
+        win.configure(bg=BG)
+        # 关键：对话框也挂主菜单。否则它拿到焦点时 macOS 会显示默认英文菜单
+        # （File/Edit/Window/Help），看起来像「菜单变了」。
+        win.config(menu=menubar)
+        win.protocol("WM_DELETE_WINDOW", lambda: _close_periods(win))
+
+        def _close_periods(w):
+            global _periods_win
+            if _periods_win is w:
+                _periods_win = None
+            w.destroy()
+
+        # 提示（wraplength 自动换行，防止右侧溢出被裁）
+        tk.Label(win, text="本表把节次（如「第3-4节」）换算成具体时刻，供按节次排课的课程使用；直接写时刻的课不必设置。",
+                 font=FONT_SM, bg=BG, fg=MUTED, wraplength=560, justify="left",
+                 anchor="w").pack(fill="x", padx=14, pady=(12, 6))
+
+        # 锚点行：紧贴提示下方、表格上方（用户要求的位置），带日历选择按钮
+        anchf = tk.Frame(win, bg=BG)
+        anchf.pack(fill="x", padx=14, pady=(0, 6))
+        tk.Label(anchf, text="学期第一周周一（单/双周锚定用，可空）：", font=FONT_SM,
+                 bg=BG, fg=MUTED).pack(side="left")
+        ent_anchor = ttk.Entry(anchf, width=14, justify="center")
+        ent_anchor.insert(0, conf["term_anchor"].strftime("%Y-%m-%d") if conf["term_anchor"] else "")
+        ent_anchor.pack(side="left", padx=4)
+
+        def _on_date_pick(d):
+            ent_anchor.delete(0, "end")
+            if d:
+                ent_anchor.insert(0, d)
+
+        tk.Button(anchf, text="日历选择", font=FONT_SM, relief="flat", fg="#2563eb",
+                  activeforeground="#1d4ed8", bg=BG, activebackground="#eef2f7", bd=0,
+                  command=lambda: _pick_date(win, ent_anchor.get().strip(), _on_date_pick)
+                  ).pack(side="left", padx=2)
+
+        # 输入区卡片：表头 + 可滚动的行区，整体用白卡包起来
+        card = tk.Frame(win, bg=CARD, highlightbackground=LINE, highlightthickness=1, bd=0)
+        card.pack(fill="both", expand=True, padx=14, pady=2)
+
+        # 列宽常量：表头与输入框共用，确保逐列对齐（列可拉伸铺满卡片宽度）
+        COL_W = (14, 10, 10)
+
+        # 注意：变量名必须区别于 run_gui 主窗口的 canvas（同一作用域链，重名会误操作主窗口）
+        dlg_canvas = tk.Canvas(card, bg=CARD, highlightthickness=0, bd=0)
+        sb = ttk.Scrollbar(card, orient="vertical", command=dlg_canvas.yview)
+        # 滚动条不预先占位：内容超出可视区才 pack，否则右侧不留浅灰槽
+        dlg_canvas.pack(side="left", fill="both", expand=True, padx=8, pady=6)
+        inner = tk.Frame(dlg_canvas, bg=CARD)
+        inner_id = dlg_canvas.create_window((0, 0), window=inner, anchor="nw")
+        dlg_canvas.configure(yscrollcommand=sb.set)
+
+        def _sync_sb():
+            """行区内容高于可视区才显示滚动条；否则撤掉，避免右侧常驻浅灰槽。"""
+            dlg_canvas.update_idletasks()
+            need = inner.winfo_reqheight() > dlg_canvas.winfo_height()
+            if need and not sb.winfo_ismapped():
+                sb.pack(side="right", fill="y", padx=(0, 4), pady=6)
+            elif not need and sb.winfo_ismapped():
+                sb.pack_forget()
+
+        def _on_canvas_config(e=None):
+            # inner 宽度跟随 canvas，否则「删」按钮列会被裁掉
+            dlg_canvas.itemconfigure(inner_id, width=e.width if e else dlg_canvas.winfo_width())
+            _sync_sb()
+        dlg_canvas.bind("<Configure>", _on_canvas_config)
+
+        def _on_inner_config(_e=None):
+            dlg_canvas.configure(scrollregion=dlg_canvas.bbox("all"))
+            _on_canvas_config()
+            _sync_sb()
+        inner.bind("<Configure>", _on_inner_config)
+        # 滚轮只在指针位于输入区时滚动，不劫持页面其它区域
+        def _on_wheel(e):
+            dlg_canvas.yview_scroll(int(-1 * (e.delta / 120)), "units")
+        dlg_canvas.bind("<MouseWheel>", _on_wheel)
+        inner.bind("<MouseWheel>", _on_wheel)
+
+        # 表头与输入行共用同一个 grid：列宽由同一组列定义分配，天然逐列对齐。
+        # 旧写法表头和输入框分属两个 Frame，字体宽度差异导致表头整体右偏。
+        inner.columnconfigure(0, weight=1)
+        for col, txt in enumerate(("节次名", "开始", "结束")):
+            tk.Label(inner, text=txt, font=FONT_SM, bg=CARD, fg=MUTED,
+                     anchor="center").grid(row=0, column=col, sticky="ew", padx=3, pady=(2, 6))
+        # 第4列空表头占位（与「删」按钮列同宽），避免末列错位
+        tk.Label(inner, text="", bg=CARD, width=3).grid(row=0, column=3, padx=3)
+        for col in range(3):
+            inner.columnconfigure(col, weight=1)
+
+        rows: list[list[tk.StringVar]] = []
+        row_widgets: dict[int, list] = {}
+        FIRST_ROW = 1  # inner 内数据行起点（0=表头）
+
+        def add_row(name="", start="", end=""):
+            r = len(rows)
+            vs = [tk.StringVar(value=name), tk.StringVar(value=start), tk.StringVar(value=end)]
+            rows.append(vs)
+            ws = []
+            for col, v in enumerate(vs):
+                ent = ttk.Entry(inner, textvariable=v, width=COL_W[col], justify="center")
+                ent.grid(row=r + FIRST_ROW, column=col, sticky="ew", padx=3, pady=2)
+                ws.append(ent)
+            btn_del = tk.Button(inner, text="删", font=FONT_SM, relief="flat", fg="#dc2626",
+                                bg=CARD, activebackground="#eef2f7", bd=0,
+                                command=lambda: del_row(r))
+            btn_del.grid(row=r + FIRST_ROW, column=3, sticky="w", padx=3)
+            ws.append(btn_del)
+            row_widgets[r] = ws
+
+        def del_row(idx):
+            if not (0 <= idx < len(rows)):
+                return
+            for wdg in row_widgets.pop(idx, []):
+                wdg.destroy()
+            rows[idx] = None  # 占位，保存时跳过空行
+
+        for x in conf["periods"]:
+            add_row(x.get("name", ""), x.get("start", ""), x.get("end", ""))
+        if not rows:
+            for x in _PERIOD_TPL_COLLEGE:
+                add_row(*x)
+
+        # 按钮行：固定贴窗口底部；不去 fill=x，让整行按内容宽度居中
+        btnf = tk.Frame(win, bg=BG)
+        btnf.pack(side="bottom", pady=(8, 12))
+
+        def load_tpl(tpl):
+            for r in list(row_widgets):
+                for wdg in row_widgets.pop(r):
+                    wdg.destroy()
+            rows.clear()
+            for x in tpl:
+                add_row(*x)
+            win.update_idletasks()
+            _on_inner_config()
+
+        FlatButton(btnf, "大学10节模板", lambda: load_tpl(_PERIOD_TPL_COLLEGE), kind="ghost").pack(side="left", padx=5)
+        FlatButton(btnf, "中学12节模板", lambda: load_tpl(_PERIOD_TPL_SCHOOL), kind="ghost").pack(side="left", padx=5)
+        FlatButton(btnf, "加一行", lambda: (add_row(), win.update_idletasks(), _on_inner_config()),
+                   kind="ghost").pack(side="left", padx=5)
+
+        def on_save():
+            periods = []
+            for vs in rows:
+                if vs is None:
+                    continue
+                name = vs[0].get().strip()
+                st, en = vs[1].get().strip(), vs[2].get().strip()
+                if not name and not st:
+                    continue
+                if not name or not st or not en:
+                    messagebox.showwarning("作息对照表", f"「{name or '（未命名）'}」行信息不全（节次名/开始/结束都要填）。", parent=win)
+                    return
+                for t in (st, en):
+                    try:
+                        dt.datetime.strptime(t, "%H:%M")
+                    except ValueError:
+                        messagebox.showwarning("作息对照表", f"「{name}」的时刻格式应为 HH:MM（如 08:00）。", parent=win)
+                        return
+                periods.append({"name": name, "start": st, "end": en})
+            ta = ent_anchor.get().strip()
+            if ta:
+                try:
+                    dt.datetime.strptime(ta, "%Y-%m-%d")
+                except ValueError:
+                    messagebox.showwarning("作息对照表", "学期第一周格式应为 YYYY-MM-DD。", parent=win)
+                    return
+            _periods_save({"term_anchor": ta or None, "periods": periods})
+            _close_periods(win)
+            set_status("作息对照表已保存，节次表述即可换算（如「明天第3-4节××课」）。")
+
+        FlatButton(btnf, "保存", on_save, kind="primary").pack(side="left", padx=6)
+        FlatButton(btnf, "取消", lambda: _close_periods(win), kind="ghost").pack(side="left", padx=5)
+        win.update_idletasks()
+        _on_inner_config()
+
+    # 作息对照菜单已于菜单栏创建时注册（必须先于帮助，详见上方 menubar 处）。
+    # 切勿用 insert_cascade(0)：索引0是 macOS 应用菜单位，占用会让菜单变英文默认项。
 
     # 视觉：贴近本机网页工作台的浅色卡片风格（浅灰底 / 白卡 / 细边框 / 蓝色主按钮）
     style = ttk.Style()
@@ -311,7 +688,8 @@ def run_gui():
     canvas.config(yscrollcommand=view_sb.set)
 
     body = tk.Frame(canvas, bg=BG)
-    body_win = canvas.create_window((16, 10), window=body, anchor="nw")
+    # 内容整体下移：顶部留 22px 缝隙（原 10px 贴 banner），底部余量同步收窄
+    body_win = canvas.create_window((16, 22), window=body, anchor="nw")
 
     def _fit_canvas(_e=None):
         cw = canvas.winfo_width()
@@ -504,6 +882,11 @@ def run_gui():
             ent_notes.insert(0, p.notes)
         cmb_recur.set(_RECUR_LABEL.get(p.recur, "不重复"))
         state["recur_custom"] = None
+        if p.recur_custom:
+            # 解析端识别出的自定义重复（单双周/共N次）：直接进自定义通道，界面可改
+            spec = dict(p.recur_custom)
+            state["recur_custom"] = {"spec": spec, "label": recur_hint_label(spec)}
+            cmb_recur.set(state["recur_custom"]["label"])
         if p.calendar_hint:
             for name in state["calendars"]:
                 if p.calendar_hint in name or name in p.calendar_hint:
@@ -648,7 +1031,8 @@ def run_gui():
         if not raw:
             messagebox.showinfo("提示", "请先输入行程描述。")
             return
-        evs = fuzzy_parse_multi(raw)
+        slots, anchor = _periods_conf()
+        evs = fuzzy_parse_multi(raw, slots=slots, term_anchor=anchor)
         if not evs:
             messagebox.showinfo("提示", "未能从输入中解析出任何行程，请调整表述或改用表单手填。")
             return
@@ -940,8 +1324,10 @@ def run_gui():
     # 按实际高度重设，保证内容恰好放得下、滚动条只在真超高时出现
     body_real = body.winfo_height()
     screen_h = root.winfo_screenheight()
-    want_h = min(max(620, header.winfo_reqheight() + body_real + 27), screen_h - 30)
-    root.geometry(f"900x{want_h}")
+    # 顶部已下移 12px，总高只加 4px：底部余量从 17px 收到 9px，视觉更均衡
+    want_h = min(max(620, header.winfo_reqheight() + body_real + 31), screen_h - 30)
+    # 显式定位到主屏左上留边，避免 macOS 记住被 pkill 时的坏坐标（窗口跑到屏幕外）
+    root.geometry(f"900x{want_h}+60+40")
     root.update_idletasks()
     _fit_canvas()
     root.minsize(800, min(620, want_h))
@@ -980,7 +1366,8 @@ def run_cli(args) -> int:
             say("ERROR:", e)
             return 1
     if args.cmd == "add":
-        events = fuzzy_parse_multi(args.text)
+        _slots, _anchor = _periods_conf()
+        events = fuzzy_parse_multi(args.text, slots=_slots, term_anchor=_anchor)
         if not events:
             say("ERROR: 未能从输入解析出任何行程")
             return 2
